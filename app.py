@@ -752,10 +752,10 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                 if seg.id not in match_scores:
                     match_scores[seg.id] = 0
 
-        # STEP E: memoQ TB lookup via search endpoint
-        # The lookupterms API returns empty TBHits for full segments on this server.
-        # Instead, we use POST /tbs/{tbGuid}/search (concordance search) to find
-        # TB entries matching n-grams extracted from source segments.
+        # STEP E: memoQ TB lookup via lookupterms with extracted n-grams
+        # The lookupterms API returns empty TBHits for full sentences.
+        # We extract 1-5 word n-grams from segments and send those as
+        # individual "segments" to lookupterms, which can match short phrases.
         if memoq_client and memoq_tb_guids:
             import json as _json
             import re as _re
@@ -791,68 +791,104 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                 search_ngrams = sorted_ngrams[:150]
                 logger.log(f"  Extracted {len(all_ngrams)} unique n-grams, searching top {len(search_ngrams)}")
 
-                # --- Step 2: Search TB for each n-gram ---
+                # --- Step 2: Use lookupterms with individual terms ---
                 found_terms = []  # List of TermMatch
                 seen_pairs = set()
+                diag_logged = 0
 
-                for ngram in search_ngrams:
+                # Send n-grams in batches via lookupterms endpoint
+                batch_size = 50
+                for batch_start in range(0, len(search_ngrams), batch_size):
+                    batch = search_ngrams[batch_start:batch_start + batch_size]
+                    # Wrap each n-gram as a segment for lookupterms API
+                    seg_list = [f"<seg>{ng}</seg>" for ng in batch]
+                    payload = {
+                        "SourceLanguage": src_code,
+                        "TargetLanguage": tgt_code,
+                        "Segments": seg_list
+                    }
                     try:
-                        search_result = memoq_client._make_request(
-                            "POST", f"/tbs/{tb_guid}/search",
-                            data={"SearchExpression": ngram}
+                        result = memoq_client._make_request(
+                            "POST", f"/tbs/{tb_guid}/lookupterms",
+                            data=payload
                         )
-                        if not search_result:
-                            continue
+                        # Log first batch raw response for diagnostics
+                        if diag_logged < 1:
+                            import json as _json
+                            raw_str = _json.dumps(result, ensure_ascii=False)[:2000] if result else "None"
+                            logger.log(f"  [DIAG] lookupterms raw response ({type(result).__name__}): {raw_str}")
+                            diag_logged += 1
 
-                        # Parse search results — try multiple response formats
-                        entries = []
-                        if isinstance(search_result, list):
-                            entries = search_result
-                        elif isinstance(search_result, dict):
-                            entries = search_result.get('Result', search_result.get('Entries', search_result.get('results', [])))
-                            if not isinstance(entries, list):
-                                entries = [entries] if isinstance(entries, dict) else []
+                        # Parse response: {"Result": [{"TBHits": [...]}, ...]}
+                        result_list = []
+                        if isinstance(result, dict):
+                            result_list = result.get('Result', [])
+                        elif isinstance(result, list):
+                            result_list = result
 
-                        for entry in entries:
-                            if not isinstance(entry, dict):
+                        for seg_idx, seg_result in enumerate(result_list):
+                            if not isinstance(seg_result, dict):
                                 continue
-                            # Try to extract source/target terms from entry
-                            languages = entry.get('Languages', [])
-                            if not isinstance(languages, list):
+                            tb_hits = seg_result.get('TBHits', [])
+                            if not isinstance(tb_hits, list):
                                 continue
-
-                            src_terms = []
-                            tgt_terms = []
-                            for lang_entry in languages:
-                                if not isinstance(lang_entry, dict):
+                            for hit_group in tb_hits:
+                                if not isinstance(hit_group, list):
                                     continue
-                                lang_code = lang_entry.get('Language', '').lower()
-                                term_items = lang_entry.get('TermItems', [])
-                                if not isinstance(term_items, list):
-                                    term_items = [term_items] if isinstance(term_items, dict) else []
-
-                                for ti in term_items:
-                                    if not isinstance(ti, dict):
+                                for hit in hit_group:
+                                    if not isinstance(hit, dict):
                                         continue
-                                    txt = ti.get('Text', '').strip()
-                                    if not txt or ti.get('IsForbidden', False):
+                                    # Log first hit structure for diagnostics
+                                    if diag_logged < 3:
+                                        hit_str = _json.dumps(hit, ensure_ascii=False)[:1000]
+                                        logger.log(f"  [DIAG] TBHit structure: {hit_str}")
+                                        diag_logged += 1
+                                    # Try Entry.Languages[].TermItems[].Text format
+                                    entry = hit.get('Entry', hit)
+                                    languages = entry.get('Languages', [])
+                                    if not isinstance(languages, list):
                                         continue
-                                    if lang_code.startswith(src_code.lower()[:3]):
-                                        src_terms.append(txt)
-                                    elif lang_code.startswith(tgt_code.lower()[:3]):
-                                        tgt_terms.append(txt)
+                                    src_terms = []
+                                    tgt_terms = []
+                                    for lang_entry in languages:
+                                        if not isinstance(lang_entry, dict):
+                                            continue
+                                        lang_code = lang_entry.get('Language', '').lower()
+                                        term_items = lang_entry.get('TermItems', [])
+                                        if not isinstance(term_items, list):
+                                            term_items = [term_items] if isinstance(term_items, dict) else []
+                                        for ti in term_items:
+                                            if not isinstance(ti, dict):
+                                                continue
+                                            txt = ti.get('Text', '').strip()
+                                            if not txt or ti.get('IsForbidden', False):
+                                                continue
+                                            if lang_code.startswith(src_code.lower()[:3]):
+                                                src_terms.append(txt)
+                                            elif lang_code.startswith(tgt_code.lower()[:3]):
+                                                tgt_terms.append(txt)
+                                    # Also try flat TransUnit format
+                                    if not src_terms:
+                                        st_val = hit.get('SourceTerm', '') or hit.get('Source', '') or entry.get('SourceTerm', '')
+                                        if st_val:
+                                            src_terms = [st_val]
+                                    if not tgt_terms:
+                                        tt_val = hit.get('TargetTerm', '') or hit.get('Target', '') or entry.get('TargetTerm', '')
+                                        if tt_val:
+                                            tgt_terms = [tt_val]
 
-                            for src_t in src_terms:
-                                for tt in tgt_terms:
-                                    pair_key = (src_t.lower(), tt.lower())
-                                    if pair_key not in seen_pairs:
-                                        seen_pairs.add(pair_key)
-                                        found_terms.append(TermMatch(
-                                            source=src_t, target=tt,
-                                            source_language=src_code,
-                                            target_language=tgt_code
-                                        ))
-                    except Exception:
+                                    for src_t in src_terms:
+                                        for tt in tgt_terms:
+                                            pair_key = (src_t.lower().strip(), tt.lower().strip())
+                                            if pair_key not in seen_pairs and pair_key[0] and pair_key[1]:
+                                                seen_pairs.add(pair_key)
+                                                found_terms.append(TermMatch(
+                                                    source=src_t.strip(), target=tt.strip(),
+                                                    source_language=src_code,
+                                                    target_language=tgt_code
+                                                ))
+                    except Exception as e:
+                        logger.log(f"  [DIAG] TB batch error: {type(e).__name__}: {str(e)[:200]}")
                         continue
 
                 logger.log(f"  TB search found {len(found_terms)} unique term pairs")
