@@ -318,33 +318,36 @@ class MemoQServerClient:
             return result
             
         except requests.exceptions.HTTPError as e:
+            error_code = "Unknown"
+            error_msg = str(e)
             try:
                 error_data = response.json()
-                error_code = error_data.get("ErrorCode", "Unknown")
-                error_msg = error_data.get("Message", "")
+                if isinstance(error_data, dict):
+                    error_code = error_data.get("ErrorCode", "Unknown")
+                    error_msg = error_data.get("Message", str(e))
+            except Exception:
+                pass  # Response body not JSON or not a dict
 
-                # Auto-recover on expired token
-                if error_code == "InvalidOrExpiredToken":
-                    logger.warning("Token expired, attempting re-login...")
-                    self.token = None
-                    self.token_expiry = None
-                    if self.login():
-                        # Retry the request once with new token
-                        request_params["authToken"] = self.token
-                        if method == "GET":
-                            response = requests.get(url, params=request_params, headers=headers,
-                                                   verify=self.verify_ssl, timeout=self.timeout)
-                        else:
-                            response = requests.post(url, json=data, params=request_params, headers=headers,
-                                                    verify=self.verify_ssl, timeout=self.timeout)
-                        response.raise_for_status()
-                        return response.json()
+            # Auto-recover on expired token
+            if error_code == "InvalidOrExpiredToken":
+                logger.warning("Token expired, attempting re-login...")
+                self.token = None
+                self.token_expiry = None
+                if self.login():
+                    # Retry the request once with new token
+                    request_params["authToken"] = self.token
+                    if method == "GET":
+                        retry_resp = requests.get(url, params=request_params, headers=headers,
+                                                  verify=self.verify_ssl, timeout=self.timeout)
                     else:
-                        raise Exception("Re-authentication failed after token expiry")
+                        retry_resp = requests.post(url, json=data, params=request_params, headers=headers,
+                                                   verify=self.verify_ssl, timeout=self.timeout)
+                    retry_resp.raise_for_status()
+                    return retry_resp.json()
+                else:
+                    raise Exception("Re-authentication failed after token expiry")
 
-                raise Exception(f"HTTP {response.status_code}: {error_code}: {error_msg}")
-            except ValueError:
-                raise Exception(f"HTTP {response.status_code}: {str(e)}")
+            raise Exception(f"HTTP {response.status_code}: {error_code}: {error_msg}")
 
         except Exception as e:
             logger.error(f"Request failed: {str(e)}")
@@ -529,13 +532,16 @@ class MemoQServerClient:
         Returns:
             List of normalized TermMatch objects
         """
-        # Clean search terms: remove XML tag placeholders
+        # Clean search terms: remove XML inline tags AND {{N}} placeholders
         cleaned_terms = []
         for term in search_terms:
-            clean_text = term.replace('{{', '').replace('}}', '')
-            parts = clean_text.split()
-            clean_text = ' '.join(p for p in parts if p.strip())
-            cleaned_terms.append(clean_text.strip())
+            # Remove XML inline tags: <bpt>, <ept>, <ph>, <it>, etc.
+            clean_text = re.sub(r'<[^>]+>', '', term)
+            # Remove {{N}} style tag placeholders
+            clean_text = re.sub(r'\{\{[^}]+\}\}', '', clean_text)
+            # Clean up extra whitespace
+            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
+            cleaned_terms.append(clean_text)
         
         # Build correct payload according to memoQ API v1 documentation
         # IMPORTANT: Segments must be wrapped in <seg> XML tags
@@ -551,10 +557,23 @@ class MemoQServerClient:
         endpoint = f"/tbs/{tb_guid}/lookupterms"
         
         try:
+            logger.info(f"TB lookup: {len(cleaned_terms)} segments, src={src_lang}, tgt={tgt_lang}")
+            logger.info(f"TB lookup endpoint: POST {endpoint}")
             logger.debug(f"TB lookup payload: {payload}")
+
             result = self._make_request("POST", endpoint, data=payload)
-            logger.info(f"TB lookup raw response: {result}")
-            
+
+            # Log raw response type and size for debugging
+            if isinstance(result, list):
+                logger.info(f"TB lookup raw response: list with {len(result)} items")
+                # Count non-empty TBHits
+                hits_count = sum(1 for item in result if isinstance(item, dict) and item.get("TBHits"))
+                logger.info(f"TB lookup: {hits_count} segments have TBHits")
+            elif isinstance(result, dict):
+                logger.info(f"TB lookup raw response: dict with keys {list(result.keys())}")
+            else:
+                logger.info(f"TB lookup raw response type: {type(result)}, value: {result}")
+
             # Response may be a list (direct) or dict with 'Result' key
             if result:
                 normalized_terms = normalize_memoq_tb_response(
@@ -562,11 +581,13 @@ class MemoQServerClient:
                     src_lang=src_lang,
                     tgt_lang=tgt_lang
                 )
-                logger.info(f"TB lookup normalized: {len(normalized_terms)} terms")
+                logger.info(f"TB lookup normalized: {len(normalized_terms)} term matches found")
+                for tm in normalized_terms:
+                    logger.info(f"  TB match: '{tm.source}' → '{tm.target}'")
                 return normalized_terms
             else:
-                logger.warning("TB lookup returned empty response")
+                logger.warning("TB lookup returned empty/None response")
                 return []
         except Exception as e:
-            logger.error(f"TB lookup error: {e}", exc_info=True)
+            logger.error(f"TB lookup FAILED: {e}", exc_info=True)
             return []

@@ -755,23 +755,34 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         # STEP E: memoQ TB batch lookup
         if memoq_client and memoq_tb_guids:
             all_segment_sources = [s.source for s in segments_needing_tm]
+            logger.log(f"TB Lookup: {len(memoq_tb_guids)} TB(s), {len(all_segment_sources)} segments, src={src_code}, tgt={tgt_code}")
 
-            for tb_guid in memoq_tb_guids:
+            for tb_idx, tb_guid in enumerate(memoq_tb_guids):
+                logger.log(f"  TB [{tb_idx+1}/{len(memoq_tb_guids)}]: {tb_guid}")
+                tb_total_matches = 0
+
                 for batch_start in range(0, len(all_segment_sources), BATCH_SIZE):
                     batch_sources = all_segment_sources[batch_start:batch_start + BATCH_SIZE]
                     batch_segs = segments_needing_tm[batch_start:batch_start + BATCH_SIZE]
 
                     try:
+                        logger.log(f"  TB batch {batch_start//BATCH_SIZE + 1}: {len(batch_sources)} segments")
                         tb_results = memoq_client.lookup_terms(
                             tb_guid, batch_sources,
                             src_lang=src_code, tgt_lang=tgt_code
                         )
                         if tb_results:
+                            tb_total_matches += len(tb_results)
+                            logger.log(f"  TB batch result: {len(tb_results)} term matches")
                             for seg in batch_segs:
                                 # TB results apply to all segments
                                 tb_context[seg.id] = tb_results
+                        else:
+                            logger.log(f"  TB batch result: no matches")
                     except Exception as e:
-                        logger.log(f"memoQ TB batch error: {e}")
+                        logger.log(f"  TB batch ERROR: {e}")
+
+                logger.log(f"  TB total: {tb_total_matches} term matches from TB {tb_guid[:8]}...")
 
             analysis_progress.progress(0.8)
 
