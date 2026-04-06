@@ -752,20 +752,59 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                 if seg.id not in match_scores:
                     match_scores[seg.id] = 0
 
-        # STEP E: memoQ TB lookup via lookupterms with extracted n-grams
-        # The lookupterms API returns empty TBHits for full sentences.
-        # We extract 1-5 word n-grams from segments and send those as
-        # individual "segments" to lookupterms, which can match short phrases.
+        # STEP E: memoQ TB lookup
+        # 1. Fetch TB metadata to get actual language codes (TB may use
+        #    2-letter codes like "en-us"/"tr" instead of 3-letter "eng"/"tur")
+        # 2. Extract n-grams from segments and send to lookupterms
+        # 3. Match found terms back to segments
         if memoq_client and memoq_tb_guids:
             import json as _json
             import re as _re
             from models.entities import TermMatch
+
+            # Build a mapping from 3-letter memoQ codes to 2-letter codes
+            _MEMOQ_3TO2 = {
+                'eng': 'en', 'tur': 'tr', 'ger': 'de', 'fre': 'fr', 'spa': 'es',
+                'ita': 'it', 'por': 'pt', 'pol': 'pl', 'rus': 'ru', 'jpn': 'ja',
+                'zho': 'zh', 'ara': 'ar', 'kor': 'ko', 'dut': 'nl', 'swe': 'sv',
+                'nor': 'no', 'dan': 'da', 'fin': 'fi', 'gre': 'el', 'heb': 'he',
+                'tha': 'th', 'vie': 'vi', 'bul': 'bg', 'rum': 'ro', 'cze': 'cs',
+                'slo': 'sk', 'ukr': 'uk', 'est': 'et', 'lav': 'lv', 'lit': 'lt',
+                'hun': 'hu', 'hrv': 'hr', 'slv': 'sl', 'mlt': 'mt', 'gle': 'ga',
+                'afr': 'af', 'ben': 'bn', 'hin': 'hi', 'cat': 'ca', 'baq': 'eu',
+            }
 
             all_segment_sources = [s.source for s in segments_needing_tm]
             logger.log(f"TB Lookup: {len(memoq_tb_guids)} TB(s), {len(all_segment_sources)} segments, src={src_code}, tgt={tgt_code}")
 
             for tb_idx, tb_guid in enumerate(memoq_tb_guids):
                 logger.log(f"  TB [{tb_idx+1}/{len(memoq_tb_guids)}]: {tb_guid}")
+
+                # --- Step 0: Get TB metadata to discover actual language codes ---
+                tb_src_lang = src_code  # fallback
+                tb_tgt_lang = tgt_code  # fallback
+                try:
+                    tb_info = memoq_client._make_request("GET", f"/tbs/{tb_guid}")
+                    tb_languages = []
+                    if isinstance(tb_info, dict):
+                        tb_languages = tb_info.get('Languages', [])
+                    logger.log(f"  [DIAG] TB languages from API: {tb_languages}")
+
+                    if tb_languages and isinstance(tb_languages, list):
+                        # Match app's src_code/tgt_code to TB's actual language codes
+                        src_base = _MEMOQ_3TO2.get(src_code.lower().split('-')[0], src_code.lower()[:2])
+                        tgt_base = _MEMOQ_3TO2.get(tgt_code.lower().split('-')[0], tgt_code.lower()[:2])
+
+                        for tb_lang in tb_languages:
+                            tl = tb_lang.lower()
+                            # Match: "en-us" starts with "en", or "eng" starts with "eng"
+                            if tl.startswith(src_base) or tl.startswith(src_code.lower()[:3]):
+                                tb_src_lang = tb_lang
+                            elif tl.startswith(tgt_base) or tl.startswith(tgt_code.lower()[:3]):
+                                tb_tgt_lang = tb_lang
+                    logger.log(f"  TB lang mapping: src={src_code} → {tb_src_lang}, tgt={tgt_code} → {tb_tgt_lang}")
+                except Exception as e:
+                    logger.log(f"  [DIAG] TB metadata fetch error: {type(e).__name__}: {str(e)[:200]}")
 
                 # --- Step 1: Extract unique n-grams from all segments ---
                 all_ngrams = set()
@@ -776,50 +815,43 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                     clean = _re.sub(r'\s+', ' ', clean).strip()
                     segment_words[seg_i] = clean.lower()
                     words = clean.split()
-                    # Generate 1-5 word n-grams
                     for n in range(1, 6):
                         for i in range(len(words) - n + 1):
                             ngram = ' '.join(words[i:i+n])
-                            # Strip punctuation from edges
                             ngram = ngram.strip('.,;:!?()[]{}"\'-—–')
                             if len(ngram) > 3 and not ngram.isdigit():
                                 all_ngrams.add(ngram.lower())
 
-                # Prioritize longer n-grams (more likely to be real terms)
                 sorted_ngrams = sorted(all_ngrams, key=len, reverse=True)
-                # Limit to top 150 to avoid too many API calls
                 search_ngrams = sorted_ngrams[:150]
                 logger.log(f"  Extracted {len(all_ngrams)} unique n-grams, searching top {len(search_ngrams)}")
 
-                # --- Step 2: Use lookupterms with individual terms ---
-                found_terms = []  # List of TermMatch
+                # --- Step 2: Use lookupterms with TB's actual language codes ---
+                found_terms = []
                 seen_pairs = set()
                 diag_logged = 0
 
-                # Send n-grams in batches via lookupterms endpoint
                 batch_size = 50
                 for batch_start in range(0, len(search_ngrams), batch_size):
                     batch = search_ngrams[batch_start:batch_start + batch_size]
-                    # Wrap each n-gram as a segment for lookupterms API
                     seg_list = [f"<seg>{ng}</seg>" for ng in batch]
                     payload = {
-                        "SourceLanguage": src_code,
-                        "TargetLanguage": tgt_code,
+                        "SourceLanguage": tb_src_lang,
+                        "TargetLanguage": tb_tgt_lang,
                         "Segments": seg_list
                     }
+                    if diag_logged < 1:
+                        logger.log(f"  [DIAG] lookupterms payload: SrcLang={tb_src_lang}, TgtLang={tb_tgt_lang}, first 3 segs={seg_list[:3]}")
                     try:
                         result = memoq_client._make_request(
                             "POST", f"/tbs/{tb_guid}/lookupterms",
                             data=payload
                         )
-                        # Log first batch raw response for diagnostics
                         if diag_logged < 1:
-                            import json as _json
                             raw_str = _json.dumps(result, ensure_ascii=False)[:2000] if result else "None"
-                            logger.log(f"  [DIAG] lookupterms raw response ({type(result).__name__}): {raw_str}")
+                            logger.log(f"  [DIAG] lookupterms response ({type(result).__name__}): {raw_str}")
                             diag_logged += 1
 
-                        # Parse response: {"Result": [{"TBHits": [...]}, ...]}
                         result_list = []
                         if isinstance(result, dict):
                             result_list = result.get('Result', [])
@@ -838,12 +870,12 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                                 for hit in hit_group:
                                     if not isinstance(hit, dict):
                                         continue
-                                    # Log first hit structure for diagnostics
-                                    if diag_logged < 3:
+                                    if diag_logged < 5:
                                         hit_str = _json.dumps(hit, ensure_ascii=False)[:1000]
-                                        logger.log(f"  [DIAG] TBHit structure: {hit_str}")
+                                        logger.log(f"  [DIAG] TBHit: {hit_str}")
                                         diag_logged += 1
-                                    # Try Entry.Languages[].TermItems[].Text format
+
+                                    # Extract terms from Entry.Languages[].TermItems[].Text
                                     entry = hit.get('Entry', hit)
                                     languages = entry.get('Languages', [])
                                     if not isinstance(languages, list):
@@ -863,17 +895,19 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                                             txt = ti.get('Text', '').strip()
                                             if not txt or ti.get('IsForbidden', False):
                                                 continue
-                                            if lang_code.startswith(src_code.lower()[:3]):
+                                            # Match language by comparing with TB's actual lang codes
+                                            if lang_code == tb_src_lang.lower() or lang_code.startswith(src_base):
                                                 src_terms.append(txt)
-                                            elif lang_code.startswith(tgt_code.lower()[:3]):
+                                            elif lang_code == tb_tgt_lang.lower() or lang_code.startswith(tgt_base):
                                                 tgt_terms.append(txt)
-                                    # Also try flat TransUnit format
+
+                                    # Fallback: try flat SourceTerm/TargetTerm fields
                                     if not src_terms:
-                                        st_val = hit.get('SourceTerm', '') or hit.get('Source', '') or entry.get('SourceTerm', '')
+                                        st_val = hit.get('SourceTerm', '') or entry.get('SourceTerm', '')
                                         if st_val:
                                             src_terms = [st_val]
                                     if not tgt_terms:
-                                        tt_val = hit.get('TargetTerm', '') or hit.get('Target', '') or entry.get('TargetTerm', '')
+                                        tt_val = hit.get('TargetTerm', '') or entry.get('TargetTerm', '')
                                         if tt_val:
                                             tgt_terms = [tt_val]
 
