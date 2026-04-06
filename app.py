@@ -754,12 +754,43 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
 
         # STEP E: memoQ TB batch lookup
         if memoq_client and memoq_tb_guids:
+            import json as _json
+            import re as _re
+
             all_segment_sources = [s.source for s in segments_needing_tm]
             logger.log(f"TB Lookup: {len(memoq_tb_guids)} TB(s), {len(all_segment_sources)} segments, src={src_code}, tgt={tgt_code}")
 
             for tb_idx, tb_guid in enumerate(memoq_tb_guids):
                 logger.log(f"  TB [{tb_idx+1}/{len(memoq_tb_guids)}]: {tb_guid}")
                 tb_total_matches = 0
+
+                # === DIRECT API DIAGNOSTIC (first 3 segments only) ===
+                try:
+                    test_sources = all_segment_sources[:3]
+                    cleaned_test = []
+                    for src in test_sources:
+                        c = _re.sub(r'<[^>]+>', '', src)
+                        c = _re.sub(r'\{\{[^}]+\}\}', '', c)
+                        c = _re.sub(r'\s+', ' ', c).strip()
+                        cleaned_test.append(c)
+
+                    test_payload = {
+                        "SourceLanguage": src_code,
+                        "TargetLanguage": tgt_code,
+                        "Segments": [f"<seg>{s}</seg>" for s in cleaned_test]
+                    }
+                    logger.log(f"  [DIAG] Direct API test with 3 segments")
+                    logger.log(f"  [DIAG] Payload: {_json.dumps(test_payload, ensure_ascii=False)[:500]}")
+
+                    raw_result = memoq_client._make_request(
+                        "POST", f"/tbs/{tb_guid}/lookupterms", data=test_payload
+                    )
+                    logger.log(f"  [DIAG] Response type: {type(raw_result).__name__}")
+                    raw_str = _json.dumps(raw_result, ensure_ascii=False) if raw_result is not None else "None"
+                    logger.log(f"  [DIAG] Response body ({len(raw_str)} chars): {raw_str[:1500]}")
+                except Exception as diag_err:
+                    logger.log(f"  [DIAG] Direct API test FAILED: {diag_err}")
+                # === END DIAGNOSTIC ===
 
                 for batch_start in range(0, len(all_segment_sources), BATCH_SIZE):
                     batch_sources = all_segment_sources[batch_start:batch_start + BATCH_SIZE]
@@ -771,13 +802,7 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                             tb_guid, batch_sources,
                             src_lang=src_code, tgt_lang=tgt_code
                         )
-
-                        # Log raw API response diagnostic from lookup_terms()
-                        diag = getattr(memoq_client, '_last_tb_diagnostic', [])
-                        for line in diag:
-                            logger.log(f"    [DIAG] {line}")
-                        raw_preview = getattr(memoq_client, '_last_tb_raw_preview', 'N/A')
-                        logger.log(f"    [RAW] {raw_preview[:800]}")
+                        logger.log(f"  lookup_terms returned: type={type(tb_results).__name__}, len={len(tb_results) if tb_results else 0}")
 
                         if tb_results:
                             tb_total_matches += len(tb_results)
