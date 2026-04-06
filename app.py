@@ -842,13 +842,13 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                                     elif lang_code.startswith(tgt_code.lower()[:3]):
                                         tgt_terms.append(txt)
 
-                            for st in src_terms:
+                            for src_t in src_terms:
                                 for tt in tgt_terms:
-                                    pair_key = (st.lower(), tt.lower())
+                                    pair_key = (src_t.lower(), tt.lower())
                                     if pair_key not in seen_pairs:
                                         seen_pairs.add(pair_key)
                                         found_terms.append(TermMatch(
-                                            source=st, target=tt,
+                                            source=src_t, target=tt,
                                             source_language=src_code,
                                             target_language=tgt_code
                                         ))
