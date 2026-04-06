@@ -119,21 +119,21 @@ def normalize_memoq_tb_response(memoq_response, src_lang: str = "eng", tgt_lang:
             logger.warning(f"Unexpected TB response type: {type(memoq_response)}")
             return []
 
-        logger.debug(f"TB normalize: result_list has {len(result_list)} items, types: {[type(x).__name__ for x in result_list[:3]]}")
+        print(f"[TB NORMALIZE] result_list has {len(result_list)} items, types: {[type(x).__name__ for x in result_list[:3]]}")
 
         for segment_result in result_list:
             if not isinstance(segment_result, dict):
-                logger.debug(f"TB normalize: skipping non-dict segment_result: {type(segment_result).__name__}")
+                print(f"[TB NORMALIZE] skipping non-dict segment_result: {type(segment_result).__name__}, value: {str(segment_result)[:200]}")
                 continue
 
             tb_hits = segment_result.get('TBHits', [])
             if not isinstance(tb_hits, list):
-                logger.debug(f"TB normalize: TBHits is not a list: {type(tb_hits).__name__}")
+                print(f"[TB NORMALIZE] TBHits is not a list: {type(tb_hits).__name__}, value: {str(tb_hits)[:200]}")
                 tb_hits = [tb_hits] if isinstance(tb_hits, dict) else []
 
             for hit in tb_hits:
                 if not isinstance(hit, dict):
-                    logger.debug(f"TB normalize: skipping non-dict hit: {type(hit).__name__}")
+                    print(f"[TB NORMALIZE] skipping non-dict hit: {type(hit).__name__}, value: {str(hit)[:200]}")
                     continue
 
                 entry = hit.get('Entry', {})
@@ -194,9 +194,11 @@ def normalize_memoq_tb_response(memoq_response, src_lang: str = "eng", tgt_lang:
                             continue
 
     except Exception as e:
+        print(f"[TB NORMALIZE] EXCEPTION: {e}")
         logger.error(f"Error normalizing memoQ TB response: {e}")
         return []
 
+    print(f"[TB NORMALIZE] returning {len(terms)} terms")
     return terms
 
 
@@ -330,7 +332,10 @@ class MemoQServerClient:
             
             response.raise_for_status()
             result = response.json()
-            logger.debug(f"Response JSON: {result}")
+            # Print diagnostic for TB lookupterms endpoint
+            if "lookupterms" in endpoint:
+                print(f"[_make_request] TB response status: {response.status_code}, body length: {len(response.text)}")
+                print(f"[_make_request] TB response first 1000 chars: {response.text[:1000]}")
             return result
             
         except requests.exceptions.HTTPError as e:
@@ -573,37 +578,51 @@ class MemoQServerClient:
         endpoint = f"/tbs/{tb_guid}/lookupterms"
         
         try:
-            logger.info(f"TB lookup: {len(cleaned_terms)} segments, src={src_lang}, tgt={tgt_lang}")
-            logger.info(f"TB lookup endpoint: POST {endpoint}")
-            logger.debug(f"TB lookup payload: {payload}")
+            print(f"[TB LOOKUP] {len(cleaned_terms)} segments, src={src_lang}, tgt={tgt_lang}")
+            print(f"[TB LOOKUP] endpoint: POST {endpoint}")
+            print(f"[TB LOOKUP] first 2 cleaned segments: {cleaned_terms[:2]}")
 
             result = self._make_request("POST", endpoint, data=payload)
 
-            # Log raw response type and size for debugging
+            # CRITICAL: Log raw response at print() level so it appears in Streamlit Cloud logs
+            print(f"[TB LOOKUP] response type: {type(result).__name__}, truthy: {bool(result)}")
             if isinstance(result, list):
-                logger.info(f"TB lookup raw response: list with {len(result)} items")
+                print(f"[TB LOOKUP] response list length: {len(result)}")
+                if result:
+                    print(f"[TB LOOKUP] first item type: {type(result[0]).__name__}")
+                    first_item = result[0]
+                    if isinstance(first_item, dict):
+                        print(f"[TB LOOKUP] first item keys: {list(first_item.keys())}")
+                        tb_hits = first_item.get("TBHits", [])
+                        print(f"[TB LOOKUP] first item TBHits count: {len(tb_hits) if isinstance(tb_hits, list) else 'not a list: ' + str(type(tb_hits))}")
+                        if tb_hits and isinstance(tb_hits, list) and len(tb_hits) > 0:
+                            print(f"[TB LOOKUP] first TBHit: {tb_hits[0]}")
+                    else:
+                        print(f"[TB LOOKUP] first item (not dict): {str(first_item)[:500]}")
                 # Count non-empty TBHits
                 hits_count = sum(1 for item in result if isinstance(item, dict) and item.get("TBHits"))
-                logger.info(f"TB lookup: {hits_count} segments have TBHits")
+                print(f"[TB LOOKUP] segments with non-empty TBHits: {hits_count}/{len(result)}")
             elif isinstance(result, dict):
-                logger.info(f"TB lookup raw response: dict with keys {list(result.keys())}")
+                print(f"[TB LOOKUP] response dict keys: {list(result.keys())}")
+                print(f"[TB LOOKUP] response preview: {str(result)[:500]}")
             else:
-                logger.info(f"TB lookup raw response type: {type(result)}, value: {result}")
+                print(f"[TB LOOKUP] unexpected response: {str(result)[:500]}")
 
-            # Response may be a list (direct) or dict with 'Result' key
-            if result:
+            # Use 'is not None' instead of truthiness check — empty list [] is valid but falsy
+            if result is not None:
                 normalized_terms = normalize_memoq_tb_response(
                     result,
                     src_lang=src_lang,
                     tgt_lang=tgt_lang
                 )
-                logger.info(f"TB lookup normalized: {len(normalized_terms)} term matches found")
+                print(f"[TB LOOKUP] normalized: {len(normalized_terms)} term matches")
                 for tm in normalized_terms:
-                    logger.info(f"  TB match: '{tm.source}' → '{tm.target}'")
+                    print(f"[TB LOOKUP]   '{tm.source}' → '{tm.target}'")
                 return normalized_terms
             else:
-                logger.warning("TB lookup returned empty/None response")
+                print("[TB LOOKUP] WARNING: response is None")
                 return []
         except Exception as e:
+            print(f"[TB LOOKUP] EXCEPTION: {e}")
             logger.error(f"TB lookup FAILED: {e}", exc_info=True)
             return []
