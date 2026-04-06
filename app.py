@@ -752,70 +752,129 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                 if seg.id not in match_scores:
                     match_scores[seg.id] = 0
 
-        # STEP E: memoQ TB batch lookup
+        # STEP E: memoQ TB lookup via search endpoint
+        # The lookupterms API returns empty TBHits for full segments on this server.
+        # Instead, we use POST /tbs/{tbGuid}/search (concordance search) to find
+        # TB entries matching n-grams extracted from source segments.
         if memoq_client and memoq_tb_guids:
             import json as _json
             import re as _re
+            from models.entities import TermMatch
 
             all_segment_sources = [s.source for s in segments_needing_tm]
             logger.log(f"TB Lookup: {len(memoq_tb_guids)} TB(s), {len(all_segment_sources)} segments, src={src_code}, tgt={tgt_code}")
 
             for tb_idx, tb_guid in enumerate(memoq_tb_guids):
                 logger.log(f"  TB [{tb_idx+1}/{len(memoq_tb_guids)}]: {tb_guid}")
-                tb_total_matches = 0
 
-                # === DIRECT API DIAGNOSTIC (first 3 segments only) ===
-                try:
-                    test_sources = all_segment_sources[:3]
-                    cleaned_test = []
-                    for src in test_sources:
-                        c = _re.sub(r'<[^>]+>', '', src)
-                        c = _re.sub(r'\{\{[^}]+\}\}', '', c)
-                        c = _re.sub(r'\s+', ' ', c).strip()
-                        cleaned_test.append(c)
+                # --- Step 1: Extract unique n-grams from all segments ---
+                all_ngrams = set()
+                segment_words = {}  # seg_index -> cleaned lowercase text
+                for seg_i, src in enumerate(all_segment_sources):
+                    clean = _re.sub(r'<[^>]+>', '', src)
+                    clean = _re.sub(r'\{\{[^}]+\}\}', '', clean)
+                    clean = _re.sub(r'\s+', ' ', clean).strip()
+                    segment_words[seg_i] = clean.lower()
+                    words = clean.split()
+                    # Generate 1-5 word n-grams
+                    for n in range(1, 6):
+                        for i in range(len(words) - n + 1):
+                            ngram = ' '.join(words[i:i+n])
+                            # Strip punctuation from edges
+                            ngram = ngram.strip('.,;:!?()[]{}"\'-—–')
+                            if len(ngram) > 3 and not ngram.isdigit():
+                                all_ngrams.add(ngram.lower())
 
-                    test_payload = {
-                        "SourceLanguage": src_code,
-                        "TargetLanguage": tgt_code,
-                        "Segments": [f"<seg>{s}</seg>" for s in cleaned_test]
-                    }
-                    logger.log(f"  [DIAG] Direct API test with 3 segments")
-                    logger.log(f"  [DIAG] Payload: {_json.dumps(test_payload, ensure_ascii=False)[:500]}")
+                # Prioritize longer n-grams (more likely to be real terms)
+                sorted_ngrams = sorted(all_ngrams, key=len, reverse=True)
+                # Limit to top 150 to avoid too many API calls
+                search_ngrams = sorted_ngrams[:150]
+                logger.log(f"  Extracted {len(all_ngrams)} unique n-grams, searching top {len(search_ngrams)}")
 
-                    raw_result = memoq_client._make_request(
-                        "POST", f"/tbs/{tb_guid}/lookupterms", data=test_payload
-                    )
-                    logger.log(f"  [DIAG] Response type: {type(raw_result).__name__}")
-                    raw_str = _json.dumps(raw_result, ensure_ascii=False) if raw_result is not None else "None"
-                    logger.log(f"  [DIAG] Response body ({len(raw_str)} chars): {raw_str[:1500]}")
-                except Exception as diag_err:
-                    logger.log(f"  [DIAG] Direct API test FAILED: {diag_err}")
-                # === END DIAGNOSTIC ===
+                # --- Step 2: Search TB for each n-gram ---
+                found_terms = []  # List of TermMatch
+                seen_pairs = set()
 
-                for batch_start in range(0, len(all_segment_sources), BATCH_SIZE):
-                    batch_sources = all_segment_sources[batch_start:batch_start + BATCH_SIZE]
-                    batch_segs = segments_needing_tm[batch_start:batch_start + BATCH_SIZE]
-
+                for ngram in search_ngrams:
                     try:
-                        logger.log(f"  TB batch {batch_start//BATCH_SIZE + 1}: {len(batch_sources)} segments")
-                        tb_results = memoq_client.lookup_terms(
-                            tb_guid, batch_sources,
-                            src_lang=src_code, tgt_lang=tgt_code
+                        search_result = memoq_client._make_request(
+                            "POST", f"/tbs/{tb_guid}/search",
+                            data={"SearchExpression": ngram}
                         )
-                        logger.log(f"  lookup_terms returned: type={type(tb_results).__name__}, len={len(tb_results) if tb_results else 0}")
+                        if not search_result:
+                            continue
 
-                        if tb_results:
-                            tb_total_matches += len(tb_results)
-                            logger.log(f"  TB batch result: {len(tb_results)} term matches")
-                            for seg in batch_segs:
-                                # TB results apply to all segments
-                                tb_context[seg.id] = tb_results
-                        else:
-                            logger.log(f"  TB batch result: no matches")
-                    except Exception as e:
-                        logger.log(f"  TB batch ERROR: {e}")
+                        # Parse search results — try multiple response formats
+                        entries = []
+                        if isinstance(search_result, list):
+                            entries = search_result
+                        elif isinstance(search_result, dict):
+                            entries = search_result.get('Result', search_result.get('Entries', search_result.get('results', [])))
+                            if not isinstance(entries, list):
+                                entries = [entries] if isinstance(entries, dict) else []
 
-                logger.log(f"  TB total: {tb_total_matches} term matches from TB {tb_guid[:8]}...")
+                        for entry in entries:
+                            if not isinstance(entry, dict):
+                                continue
+                            # Try to extract source/target terms from entry
+                            languages = entry.get('Languages', [])
+                            if not isinstance(languages, list):
+                                continue
+
+                            src_terms = []
+                            tgt_terms = []
+                            for lang_entry in languages:
+                                if not isinstance(lang_entry, dict):
+                                    continue
+                                lang_code = lang_entry.get('Language', '').lower()
+                                term_items = lang_entry.get('TermItems', [])
+                                if not isinstance(term_items, list):
+                                    term_items = [term_items] if isinstance(term_items, dict) else []
+
+                                for ti in term_items:
+                                    if not isinstance(ti, dict):
+                                        continue
+                                    txt = ti.get('Text', '').strip()
+                                    if not txt or ti.get('IsForbidden', False):
+                                        continue
+                                    if lang_code.startswith(src_code.lower()[:3]):
+                                        src_terms.append(txt)
+                                    elif lang_code.startswith(tgt_code.lower()[:3]):
+                                        tgt_terms.append(txt)
+
+                            for st in src_terms:
+                                for tt in tgt_terms:
+                                    pair_key = (st.lower(), tt.lower())
+                                    if pair_key not in seen_pairs:
+                                        seen_pairs.add(pair_key)
+                                        found_terms.append(TermMatch(
+                                            source=st, target=tt,
+                                            source_language=src_code,
+                                            target_language=tgt_code
+                                        ))
+                    except Exception:
+                        continue
+
+                logger.log(f"  TB search found {len(found_terms)} unique term pairs")
+                for ft in found_terms[:20]:
+                    logger.log(f"    '{ft.source}' → '{ft.target}'")
+                if len(found_terms) > 20:
+                    logger.log(f"    ... and {len(found_terms) - 20} more")
+
+                # --- Step 3: Match found terms against each segment ---
+                if found_terms:
+                    for seg_i, seg in enumerate(segments_needing_tm):
+                        seg_lower = segment_words.get(seg_i, seg.source.lower())
+                        matching_terms = []
+                        for ft in found_terms:
+                            if ft.source.lower() in seg_lower:
+                                matching_terms.append(ft)
+                        if matching_terms:
+                            existing = tb_context.get(seg.id, [])
+                            tb_context[seg.id] = existing + matching_terms
+
+                tb_matched_segs = sum(1 for sid in tb_context if tb_context[sid])
+                logger.log(f"  TB total: {len(found_terms)} terms matched across {tb_matched_segs} segments")
 
             analysis_progress.progress(0.8)
 
