@@ -259,10 +259,10 @@ SEGMENTS TO TRANSLATE:
         # Sort alphabetically for readability
         sorted_tb = sorted(unique_tb.items())[:max_terms]
         
-        text = "REQUIRED TERMINOLOGY:\n"
+        text = "REQUIRED TERMINOLOGY (use these exact translations):\n"
         for source, target in sorted_tb:
-            text += f"- {source} = {target}\n"
-        
+            text += f"- \"{source}\" → \"{target}\"\n"
+
         text += "\n"
         return text
     

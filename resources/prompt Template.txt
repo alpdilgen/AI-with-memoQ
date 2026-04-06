@@ -4,7 +4,8 @@ Maintain the exact structure of the original document, including all specified t
 Do not add or remove any spaces, line breaks, paragraphs, or formatting elements.
 Use the examples provided below as reference for style and structure:
 %EXAMPLES%
-Apply terminology consistently. Use the approved terms listed below (if any). You might choose to avoid irrelevant terms or replace them with better alternatives if they truly improve the translation. However, when the choice is a matter of preference and the term is appropriate for the translation, stick to the provided one!
+TERMINOLOGY RULES (MANDATORY):
+The terms listed below come from the client's approved termbase. You MUST use these exact translations whenever the source term appears in the segment. Do not use synonyms, alternative translations, or paraphrases for these terms — the client requires these specific translations for consistency. Only deviate if the term is clearly irrelevant to the context of the segment.
 %TERMS%
 Avoid using the following terms in your translation (if any):
 %FORBIDDENTERMS%

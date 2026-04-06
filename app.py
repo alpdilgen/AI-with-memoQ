@@ -822,9 +822,22 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                             if len(ngram) > 3 and not ngram.isdigit():
                                 all_ngrams.add(ngram.lower())
 
-                sorted_ngrams = sorted(all_ngrams, key=len, reverse=True)
-                search_ngrams = sorted_ngrams[:150]
-                logger.log(f"  Extracted {len(all_ngrams)} unique n-grams, searching top {len(search_ngrams)}")
+                # Strategy: prioritize short n-grams (1-3 words) since real
+                # terminology entries are usually 1-3 words. Then add longer
+                # ones. Also send full segments at the end as a final pass.
+                short_ngrams = sorted([ng for ng in all_ngrams if len(ng.split()) <= 3], key=len)
+                long_ngrams = sorted([ng for ng in all_ngrams if len(ng.split()) > 3], key=len, reverse=True)
+                # Combine: all short n-grams first, then longer ones up to limit
+                search_ngrams = short_ngrams + long_ngrams
+                search_ngrams = search_ngrams[:500]
+                # Also append full cleaned segments for lookupterms to extract
+                for seg_i, src in enumerate(all_segment_sources):
+                    clean = _re.sub(r'<[^>]+>', '', src)
+                    clean = _re.sub(r'\{\{[^}]+\}\}', '', clean)
+                    clean = _re.sub(r'\s+', ' ', clean).strip()
+                    if clean and clean.lower() not in all_ngrams:
+                        search_ngrams.append(clean)
+                logger.log(f"  Extracted {len(all_ngrams)} unique n-grams, searching {len(search_ngrams)} items (incl. full segments)")
 
                 # --- Step 2: Use lookupterms with TB's actual language codes ---
                 found_terms = []
