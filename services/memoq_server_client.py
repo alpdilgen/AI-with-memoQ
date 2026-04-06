@@ -578,35 +578,38 @@ class MemoQServerClient:
         endpoint = f"/tbs/{tb_guid}/lookupterms"
         
         try:
-            print(f"[TB LOOKUP] {len(cleaned_terms)} segments, src={src_lang}, tgt={tgt_lang}")
-            print(f"[TB LOOKUP] endpoint: POST {endpoint}")
-            print(f"[TB LOOKUP] first 2 cleaned segments: {cleaned_terms[:2]}")
-
             result = self._make_request("POST", endpoint, data=payload)
 
-            # CRITICAL: Log raw response at print() level so it appears in Streamlit Cloud logs
-            print(f"[TB LOOKUP] response type: {type(result).__name__}, truthy: {bool(result)}")
+            # Store raw response diagnostics for TransactionLogger in app.py
+            import json
+            diag_lines = []
+            diag_lines.append(f"response type: {type(result).__name__}")
             if isinstance(result, list):
-                print(f"[TB LOOKUP] response list length: {len(result)}")
+                diag_lines.append(f"list length: {len(result)}")
                 if result:
-                    print(f"[TB LOOKUP] first item type: {type(result[0]).__name__}")
-                    first_item = result[0]
-                    if isinstance(first_item, dict):
-                        print(f"[TB LOOKUP] first item keys: {list(first_item.keys())}")
-                        tb_hits = first_item.get("TBHits", [])
-                        print(f"[TB LOOKUP] first item TBHits count: {len(tb_hits) if isinstance(tb_hits, list) else 'not a list: ' + str(type(tb_hits))}")
-                        if tb_hits and isinstance(tb_hits, list) and len(tb_hits) > 0:
-                            print(f"[TB LOOKUP] first TBHit: {tb_hits[0]}")
+                    first = result[0]
+                    diag_lines.append(f"first item type: {type(first).__name__}")
+                    if isinstance(first, dict):
+                        diag_lines.append(f"first item keys: {list(first.keys())}")
+                        tb_hits = first.get("TBHits", "MISSING")
+                        if isinstance(tb_hits, list):
+                            diag_lines.append(f"first TBHits count: {len(tb_hits)}")
+                            if tb_hits:
+                                diag_lines.append(f"first TBHit: {json.dumps(tb_hits[0], ensure_ascii=False)[:500]}")
+                        else:
+                            diag_lines.append(f"TBHits value: {str(tb_hits)[:200]}")
                     else:
-                        print(f"[TB LOOKUP] first item (not dict): {str(first_item)[:500]}")
-                # Count non-empty TBHits
+                        diag_lines.append(f"first item: {str(first)[:300]}")
                 hits_count = sum(1 for item in result if isinstance(item, dict) and item.get("TBHits"))
-                print(f"[TB LOOKUP] segments with non-empty TBHits: {hits_count}/{len(result)}")
+                diag_lines.append(f"items with TBHits: {hits_count}/{len(result)}")
             elif isinstance(result, dict):
-                print(f"[TB LOOKUP] response dict keys: {list(result.keys())}")
-                print(f"[TB LOOKUP] response preview: {str(result)[:500]}")
+                diag_lines.append(f"dict keys: {list(result.keys())}")
+                diag_lines.append(f"preview: {json.dumps(result, ensure_ascii=False)[:500]}")
             else:
-                print(f"[TB LOOKUP] unexpected response: {str(result)[:500]}")
+                diag_lines.append(f"raw: {str(result)[:500]}")
+
+            self._last_tb_diagnostic = diag_lines
+            self._last_tb_raw_preview = json.dumps(result, ensure_ascii=False)[:1000] if result else "None/empty"
 
             # Use 'is not None' instead of truthiness check — empty list [] is valid but falsy
             if result is not None:
@@ -615,14 +618,11 @@ class MemoQServerClient:
                     src_lang=src_lang,
                     tgt_lang=tgt_lang
                 )
-                print(f"[TB LOOKUP] normalized: {len(normalized_terms)} term matches")
-                for tm in normalized_terms:
-                    print(f"[TB LOOKUP]   '{tm.source}' → '{tm.target}'")
                 return normalized_terms
             else:
-                print("[TB LOOKUP] WARNING: response is None")
                 return []
         except Exception as e:
-            print(f"[TB LOOKUP] EXCEPTION: {e}")
+            self._last_tb_diagnostic = [f"EXCEPTION: {e}"]
+            self._last_tb_raw_preview = f"EXCEPTION: {e}"
             logger.error(f"TB lookup FAILED: {e}", exc_info=True)
             return []

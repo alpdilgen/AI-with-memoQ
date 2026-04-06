@@ -771,6 +771,14 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                             tb_guid, batch_sources,
                             src_lang=src_code, tgt_lang=tgt_code
                         )
+
+                        # Log raw API response diagnostic from lookup_terms()
+                        diag = getattr(memoq_client, '_last_tb_diagnostic', [])
+                        for line in diag:
+                            logger.log(f"    [DIAG] {line}")
+                        raw_preview = getattr(memoq_client, '_last_tb_raw_preview', 'N/A')
+                        logger.log(f"    [RAW] {raw_preview[:800]}")
+
                         if tb_results:
                             tb_total_matches += len(tb_results)
                             logger.log(f"  TB batch result: {len(tb_results)} term matches")
