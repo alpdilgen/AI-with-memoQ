@@ -78,19 +78,18 @@ Maintain the exact structure of the original document, including all specified t
 Do not add or remove any spaces, line breaks, paragraphs, or formatting elements.
 Use the examples provided below as reference for style and structure:
 %EXAMPLES%
-TERMINOLOGY RULES (MANDATORY):
-The terms listed below come from the client's approved termbase. You MUST use these exact translations whenever the source term appears in the segment. Do not use synonyms, alternative translations, or paraphrases for these terms — the client requires these specific translations for consistency. Only deviate if the term is clearly irrelevant to the context of the segment.
+TERMINOLOGY RULES (MANDATORY — HIGHEST PRIORITY):
+The terms listed below come from the client's approved termbase. You MUST use these EXACT CHARACTER SEQUENCES as the base form in your translation. Do not rephrase, restructure, or use alternative compound forms. For example, if the termbase says "variable frequency drive" = "değişken frekanslı sürücü", you MUST write "değişken frekanslı sürücü" — do NOT write "değişken frekans sürücüsü" or any other variant.
+You may ONLY add grammatical suffixes required by Turkish grammar (plural -lar/-ler, case endings -de/-da/-den/-dan/-ı/-i/-u/-ü, etc.) to the END of the approved term. The base form of the term must remain exactly as specified.
 %TERMS%
 Avoid using the following terms in your translation (if any):
 %FORBIDDENTERMS%
-TM MATCH ADAPTATION RULES:
-Some segments below include a ">>> TM MATCH" line showing a previous translation from Translation Memory with a similarity percentage, followed by a ">>> TM SOURCE" line showing what the original source was. When you see these:
-- Use the TM match translation as your STARTING POINT. Do NOT translate the segment from scratch.
-- ADAPT the TM match to accurately translate the current source segment. Fix any differences between the TM source and the current source.
-- For high similarity matches (90%+), make only minimal necessary changes.
-- For lower similarity matches (70-89%), adapt more freely but still preserve reusable parts of the TM translation.
-- If the TM match is clearly irrelevant or misleading, you may translate from scratch.
-- Always apply the mandatory terminology rules above, even when adapting a TM match.
+PER-SEGMENT CONTEXT:
+Some segments below include ">>> TERMS:" lines showing the specific approved terms for that segment. These are the SAME mandatory terms from the list above, shown again next to the segment for your convenience. Use them exactly as specified.
+Some segments also include ">>> TM MATCH" lines showing a previous translation from Translation Memory:
+- Use the TM match as your STARTING POINT — adapt it, do not translate from scratch.
+- For 90%+ matches, make only minimal changes. For 70-89%, adapt more freely but preserve reusable parts.
+- Always apply the mandatory terminology rules, even when adapting a TM match.
 Return only the translated text. Do not include explanations or comments in your response.
 OUTPUT FORMAT:
 [ID] Translated text
@@ -340,16 +339,16 @@ SEGMENTS TO TRANSLATE:
         return f"STYLE REFERENCE:\n{reference_context}\n\n"
     
     def _format_segments(self, segments: List[TranslationSegment],
-                         tm_context: Optional[Dict[str, List]] = None) -> str:
+                         tm_context: Optional[Dict[str, List]] = None,
+                         tb_context: Optional[Dict[str, List]] = None) -> str:
         """
         Format segments for translation, embedding per-segment TM matches
-
-        When a segment has a fuzzy TM match, the match is shown directly below
-        the segment so the LLM can adapt it rather than translating from scratch.
+        and per-segment TB terms directly next to each segment.
 
         Args:
             segments: List of TranslationSegment objects
             tm_context: Optional dict {segment_id: [TMMatch objects]}
+            tb_context: Optional dict {segment_id: [TermMatch objects]}
 
         Returns:
             Formatted segment list for prompt
@@ -357,6 +356,20 @@ SEGMENTS TO TRANSLATE:
         seg_text = ""
         for seg in segments:
             seg_text += f"[{seg.id}] {seg.source}\n"
+
+            # Embed per-segment TB terms right next to the segment
+            if tb_context and seg.id in tb_context and tb_context[seg.id]:
+                term_pairs = []
+                for term in tb_context[seg.id]:
+                    if isinstance(term, TermMatch):
+                        term_pairs.append(f"\"{term.source}\" = \"{term.target}\"")
+                    elif isinstance(term, dict):
+                        src = term.get('source', '')
+                        tgt = term.get('target', '')
+                        if src and tgt:
+                            term_pairs.append(f"\"{src}\" = \"{tgt}\"")
+                if term_pairs:
+                    seg_text += f">>> TERMS: {', '.join(term_pairs)}\n"
 
             # Embed best TM match for this segment if available
             if tm_context and seg.id in tm_context and tm_context[seg.id]:
@@ -444,8 +457,8 @@ SEGMENTS TO TRANSLATE:
         # ===== 5. Format DNT =====
         dnt_text = self._format_dnt_context(dnt_terms, max_terms=50)
         
-        # ===== 6. Format Segments (with per-segment TM matches embedded) =====
-        seg_text = self._format_segments(segments, tm_context=tm_context)
+        # ===== 6. Format Segments (with per-segment TM + TB embedded) =====
+        seg_text = self._format_segments(segments, tm_context=tm_context, tb_context=tb_context)
         
         # ===== 7. Build Prompt from Template =====
         prompt = self.template
