@@ -92,34 +92,50 @@ with st.sidebar:
     
     # Language Settings
     st.subheader("🌐 Languages")
-    
-    detected_src = st.session_state.detected_languages.get('source')
-    detected_tgt = st.session_state.detected_languages.get('target')
-    
-    # Convert detected ISO codes (en-gb) to memoQ codes (eng-GB)
-    detected_src = config.convert_detected_lang(detected_src) if detected_src else None
-    detected_tgt = config.convert_detected_lang(detected_tgt) if detected_tgt else None
-    
-    lang_keys = list(config.SUPPORTED_LANGUAGES.keys())
-    
-    src_default = lang_keys.index(detected_src) if detected_src in lang_keys else lang_keys.index('eng')
-    tgt_default = lang_keys.index(detected_tgt) if detected_tgt in lang_keys else lang_keys.index('tur')
-    
-    src_code = st.selectbox(
-        "Source Language", 
-        lang_keys, 
-        index=src_default,
-        format_func=lambda x: f"{config.SUPPORTED_LANGUAGES[x]} ({x})" + (" ✓" if x == detected_src else "")
-    )
-    tgt_code = st.selectbox(
-        "Target Language", 
-        lang_keys, 
-        index=tgt_default,
-        format_func=lambda x: f"{config.SUPPORTED_LANGUAGES[x]} ({x})" + (" ✓" if x == detected_tgt else "")
-    )
-    
-    if detected_src and detected_tgt:
-        st.caption(f"🔍 Auto-detected: {detected_src} → {detected_tgt}")
+
+    # Raw detected codes from MQXLIFF (e.g., "en-us", "tr")
+    raw_detected_src = st.session_state.detected_languages.get('source')
+    raw_detected_tgt = st.session_state.detected_languages.get('target')
+
+    if raw_detected_src and raw_detected_tgt:
+        # Auto-detected: show as read-only info, store raw codes for API use
+        src_display = config.get_language_display_name(raw_detected_src)
+        tgt_display = config.get_language_display_name(raw_detected_tgt)
+
+        st.text_input("Source Language", value=f"{src_display} ({raw_detected_src})", disabled=True)
+        st.text_input("Target Language", value=f"{tgt_display} ({raw_detected_tgt})", disabled=True)
+        st.caption("🔍 Auto-detected from uploaded file")
+
+        # Store raw codes — these will be used for TM/TB API calls
+        src_code = raw_detected_src.lower()
+        tgt_code = raw_detected_tgt.lower()
+
+        # Also store 3-letter equivalents for backward compatibility
+        src_code_3letter = config.convert_detected_lang(raw_detected_src) if raw_detected_src else 'eng'
+        tgt_code_3letter = config.convert_detected_lang(raw_detected_tgt) if raw_detected_tgt else 'tur'
+        # Keep base 3-letter for SUPPORTED_LANGUAGES lookup
+        src_code_3letter_base = src_code_3letter.split('-')[0] if src_code_3letter else 'eng'
+        tgt_code_3letter_base = tgt_code_3letter.split('-')[0] if tgt_code_3letter else 'tur'
+    else:
+        # No file uploaded yet: show manual selectbox as fallback
+        lang_keys = list(config.SUPPORTED_LANGUAGES.keys())
+        src_code = st.selectbox(
+            "Source Language",
+            lang_keys,
+            index=lang_keys.index('eng'),
+            format_func=lambda x: f"{config.SUPPORTED_LANGUAGES[x]} ({x})"
+        )
+        tgt_code = st.selectbox(
+            "Target Language",
+            lang_keys,
+            index=lang_keys.index('tur'),
+            format_func=lambda x: f"{config.SUPPORTED_LANGUAGES[x]} ({x})"
+        )
+        st.caption("📄 Upload a file to auto-detect languages")
+        src_code_3letter = src_code
+        tgt_code_3letter = src_code
+        src_code_3letter_base = src_code
+        tgt_code_3letter_base = tgt_code
     
     st.divider()
     
@@ -762,18 +778,6 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
             import re as _re
             from models.entities import TermMatch
 
-            # Build a mapping from 3-letter memoQ codes to 2-letter codes
-            _MEMOQ_3TO2 = {
-                'eng': 'en', 'tur': 'tr', 'ger': 'de', 'fre': 'fr', 'spa': 'es',
-                'ita': 'it', 'por': 'pt', 'pol': 'pl', 'rus': 'ru', 'jpn': 'ja',
-                'zho': 'zh', 'ara': 'ar', 'kor': 'ko', 'dut': 'nl', 'swe': 'sv',
-                'nor': 'no', 'dan': 'da', 'fin': 'fi', 'gre': 'el', 'heb': 'he',
-                'tha': 'th', 'vie': 'vi', 'bul': 'bg', 'rum': 'ro', 'cze': 'cs',
-                'slo': 'sk', 'ukr': 'uk', 'est': 'et', 'lav': 'lv', 'lit': 'lt',
-                'hun': 'hu', 'hrv': 'hr', 'slv': 'sl', 'mlt': 'mt', 'gle': 'ga',
-                'afr': 'af', 'ben': 'bn', 'hin': 'hi', 'cat': 'ca', 'baq': 'eu',
-            }
-
             all_segment_sources = [s.source for s in segments_needing_tm]
             logger.log(f"TB Lookup: {len(memoq_tb_guids)} TB(s), {len(all_segment_sources)} segments, src={src_code}, tgt={tgt_code}")
 
@@ -791,16 +795,22 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                     logger.log(f"  [DIAG] TB languages from API: {tb_languages}")
 
                     if tb_languages and isinstance(tb_languages, list):
-                        # Match app's src_code/tgt_code to TB's actual language codes
-                        src_base = _MEMOQ_3TO2.get(src_code.lower().split('-')[0], src_code.lower()[:2])
-                        tgt_base = _MEMOQ_3TO2.get(tgt_code.lower().split('-')[0], tgt_code.lower()[:2])
+                        # Build base code for matching: "en-us" → "en", "eng" → "eng", "eng-US" → "eng"
+                        src_base = src_code.lower().split('-')[0]
+                        tgt_base = tgt_code.lower().split('-')[0]
+                        # Also get 2-letter from 3-letter if needed
+                        _3to2 = config.ISO_TO_MEMOQ_LANG  # 2-letter → 3-letter
+                        _2to3 = {v.lower(): k for k, v in _3to2.items()}  # 3-letter → 2-letter
+                        src_base_alt = _2to3.get(src_base, src_base)
+                        tgt_base_alt = _2to3.get(tgt_base, tgt_base)
 
                         for tb_lang in tb_languages:
                             tl = tb_lang.lower()
-                            # Match: "en-us" starts with "en", or "eng" starts with "eng"
-                            if tl.startswith(src_base) or tl.startswith(src_code.lower()[:3]):
+                            tl_base = tl.split('-')[0]
+                            # Match src: compare base codes (en==en, eng==eng, or cross 2/3-letter)
+                            if tl_base == src_base or tl_base == src_base_alt:
                                 tb_src_lang = tb_lang
-                            elif tl.startswith(tgt_base) or tl.startswith(tgt_code.lower()[:3]):
+                            elif tl_base == tgt_base or tl_base == tgt_base_alt:
                                 tb_tgt_lang = tb_lang
                     logger.log(f"  TB lang mapping: src={src_code} → {tb_src_lang}, tgt={tgt_code} → {tb_tgt_lang}")
                 except Exception as e:
@@ -1082,8 +1092,8 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                     logger.log(f"DNT list: {len(dnt_terms)} forbidden terms")
                 
                 prompt = prompt_builder.build_prompt(
-                    config.SUPPORTED_LANGUAGES[src_code],
-                    config.SUPPORTED_LANGUAGES[tgt_code],
+                    config.get_language_display_name(src_code),
+                    config.get_language_display_name(tgt_code),
                     batch, 
                     batch_tm, 
                     batch_tb,
@@ -1683,8 +1693,8 @@ with tab3:
             prompt, metadata = PromptGenerator.generate(
                 analysis=analysis_result,
                 style_guide=style_result,
-                source_lang=config.SUPPORTED_LANGUAGES[src_code],
-                target_lang=config.SUPPORTED_LANGUAGES[tgt_code],
+                source_lang=config.get_language_display_name(src_code),
+                target_lang=config.get_language_display_name(tgt_code),
                 forbidden_terms=forbidden_terms
             )
             

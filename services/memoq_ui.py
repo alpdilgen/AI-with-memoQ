@@ -280,16 +280,25 @@ class MemoQUI:
     @staticmethod
     def _get_memoq_lang_code(lang_code: str) -> str:
         """
-        Language codes are already in memoQ format (3-letter + optional variant)
-        
-        Args:
-            lang_code: memoQ language code (e.g., 'eng', 'eng-GB', 'tur')
-        
-        Returns:
-            Same code (already in correct format)
+        Convert any language code format to memoQ 3-letter code for API filtering.
+
+        Handles: 'eng', 'eng-US', 'en-us', 'en', 'tur', 'tr' etc.
+        Returns 3-letter base code for TM/TB list filtering (e.g., 'eng', 'tur').
         """
-        # Codes are already memoQ 3-letter codes from config
-        return lang_code
+        from config import ISO_TO_MEMOQ_LANG
+        if not lang_code:
+            return lang_code
+        code = lang_code.lower().strip()
+        base = code.split('-')[0]
+        # If already 3-letter, return as-is (with locale if present)
+        if len(base) == 3:
+            return lang_code
+        # Convert 2-letter to 3-letter
+        three = ISO_TO_MEMOQ_LANG.get(base, base)
+        if '-' in code:
+            locale = code.split('-', 1)[1].upper()
+            return f"{three}-{locale}"
+        return three
     
     @staticmethod
     def show_tm_lookup_results(
