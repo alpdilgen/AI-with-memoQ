@@ -63,7 +63,7 @@ class MemoQUI:
                     help="Check for production, uncheck for self-signed certificates"
                 )
                 
-                submitted = st.form_submit_button("🔐 Connect", use_container_width=True)
+                submitted = st.form_submit_button("🔐 Connect", width="stretch")
                 
                 if submitted:
                     st.session_state.memoq_server_url = server_url
@@ -76,7 +76,7 @@ class MemoQUI:
             # Connection status
             if 'memoq_connected' in st.session_state and st.session_state.memoq_connected:
                 st.success("✓ Connected to memoQ Server")
-                if st.button("🔌 Disconnect", use_container_width=True):
+                if st.button("🔌 Disconnect", width="stretch"):
                     st.session_state.memoq_connected = False
                     st.session_state.memoq_client = None
                     st.rerun()
@@ -130,7 +130,7 @@ class MemoQUI:
         with col1:
             load_button = st.button(
                 "📥 Load",
-                use_container_width=True,
+                width="stretch",
                 help="Load Translation Memories and Termbases from memoQ Server"
             )
         

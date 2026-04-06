@@ -93,7 +93,7 @@ def show_analysis_screen(analysis_results):
             })
 
     df = pd.DataFrame(breakdown_data)
-    st.dataframe(df, use_container_width=True, hide_index=True)
+    st.dataframe(df, width="stretch", hide_index=True)
 
     st.markdown("---")
     st.markdown("#### Cost Breakdown")
@@ -104,20 +104,20 @@ def show_analysis_screen(analysis_results):
         {'Category': 'LLM Only (<60%)', 'Segments': cost['breakdown']['llm_only'], 'Cost': f"${cost['llm_cost']:.4f}"}
     ]
     cost_df = pd.DataFrame(cost_data)
-    st.dataframe(cost_df, use_container_width=True, hide_index=True)
+    st.dataframe(cost_df, width="stretch", hide_index=True)
 
     st.markdown("---")
 
     # Action buttons
     col1, col2 = st.columns(2)
     with col1:
-        if st.button("✅ Proceed to Translation", type="primary", use_container_width=True):
+        if st.button("✅ Proceed to Translation", type="primary", width="stretch"):
             st.session_state.ready_to_translate = True
             st.session_state.analysis_triggered = False
             st.rerun()
 
     with col2:
-        if st.button("🔄 Clear Analysis", use_container_width=True):
+        if st.button("🔄 Clear Analysis", width="stretch"):
             st.session_state.analysis_triggered = False
             st.session_state.analysis_results = None
             st.rerun()

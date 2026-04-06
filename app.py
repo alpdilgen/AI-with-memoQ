@@ -185,7 +185,7 @@ with st.sidebar:
     cache_files = CacheManager.get_cache_info()
     if cache_files:
         st.caption(f"{len(cache_files)} cached TM(s)")
-        if st.button("🗑️ Clear All Cache", type="secondary", use_container_width=True):
+        if st.button("🗑️ Clear All Cache", type="secondary", width="stretch"):
             count = CacheManager.clear_tm_cache()
             st.success(f"Cleared {count} cache file(s)")
             st.rerun()
@@ -223,7 +223,7 @@ with st.sidebar:
             help="Disable for self-signed certificates"
         )
         
-        memoq_connect = st.form_submit_button("🔐 Connect", use_container_width=True)
+        memoq_connect = st.form_submit_button("🔐 Connect", width="stretch")
     
     if memoq_connect:
         st.session_state.memoq_server_url = memoq_url
@@ -249,7 +249,7 @@ with st.sidebar:
     
     if st.session_state.memoq_connected and st.session_state.memoq_client:
         st.success("✓ Connected to memoQ Server")
-        if st.button("🔌 Disconnect", use_container_width=True):
+        if st.button("🔌 Disconnect", width="stretch"):
             st.session_state.memoq_connected = False
             st.session_state.memoq_client = None
             st.rerun()
@@ -1086,7 +1086,7 @@ with tab1:
 
                 # Analyze button - show if no analysis results yet
                 if st.session_state.analysis_results is None:
-                    if st.button("🔍 Analyze File", type="primary", use_container_width=True):
+                    if st.button("🔍 Analyze File", type="primary", width="stretch"):
                         st.session_state.analysis_triggered = True
 
                         with st.status("Analyzing with memoQ Server TM...", expanded=True) as status:
@@ -1230,7 +1230,7 @@ with tab1:
                 # Button to create embeddings
                 if not st.session_state.reference_embeddings_ready:
                     if api_key:
-                        if st.button("🧠 Create Semantic Index", type="secondary", use_container_width=True):
+                        if st.button("🧠 Create Semantic Index", type="secondary", width="stretch"):
                             with st.spinner("Creating embeddings... This may take a minute."):
                                 try:
                                     matcher = EmbeddingMatcher(api_key)
@@ -1314,7 +1314,7 @@ with tab1:
         3. Default template
         """)
         
-        if st.button("🚀 Start Translation", type="primary", use_container_width=True, disabled=not st.session_state.get('ready_to_translate', False)):
+        if st.button("🚀 Start Translation", type="primary", width="stretch", disabled=not st.session_state.get('ready_to_translate', False)):
             if xliff_file:
                 xliff_file.seek(0)
                 
@@ -1398,7 +1398,7 @@ with tab2:
             })
         
         df = pd.DataFrame(preview_data)
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, width="stretch")
     else:
         st.info("No results yet. Run translation in Workspace tab.")
 
@@ -1502,7 +1502,7 @@ with tab3:
         st.divider()
         
         # Generate button
-        if st.button("🔮 Generate Prompt", type="primary", use_container_width=True, 
+        if st.button("🔮 Generate Prompt", type="primary", width="stretch", 
                      disabled=(not analysis_file and not style_file and not dnt_file)):
             
             prompt, metadata = PromptGenerator.generate(
@@ -1551,7 +1551,7 @@ with tab3:
             col_act1, col_act2, col_act3 = st.columns(3)
             
             with col_act1:
-                if st.button("✅ Use This Prompt", type="primary", use_container_width=True):
+                if st.button("✅ Use This Prompt", type="primary", width="stretch"):
                     st.session_state.use_generated_prompt = True
                     st.success("Prompt activated! Go to Workspace tab to start translation.")
                     
@@ -1562,11 +1562,11 @@ with tab3:
                     st.session_state.generated_prompt,
                     file_name=f"cat_tool_prompt_{timestamp}.txt",
                     mime="text/plain",
-                    use_container_width=True
+                    width="stretch"
                 )
             
             with col_act3:
-                if st.button("🗑️ Clear", use_container_width=True):
+                if st.button("🗑️ Clear", width="stretch"):
                     st.session_state.generated_prompt = None
                     st.session_state.prompt_metadata = {}
                     st.session_state.use_generated_prompt = False

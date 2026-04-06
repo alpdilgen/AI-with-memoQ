@@ -119,19 +119,29 @@ def normalize_memoq_tb_response(memoq_response, src_lang: str = "eng", tgt_lang:
             logger.warning(f"Unexpected TB response type: {type(memoq_response)}")
             return []
 
+        logger.debug(f"TB normalize: result_list has {len(result_list)} items, types: {[type(x).__name__ for x in result_list[:3]]}")
+
         for segment_result in result_list:
             if not isinstance(segment_result, dict):
+                logger.debug(f"TB normalize: skipping non-dict segment_result: {type(segment_result).__name__}")
                 continue
 
             tb_hits = segment_result.get('TBHits', [])
+            if not isinstance(tb_hits, list):
+                logger.debug(f"TB normalize: TBHits is not a list: {type(tb_hits).__name__}")
+                tb_hits = [tb_hits] if isinstance(tb_hits, dict) else []
 
             for hit in tb_hits:
+                if not isinstance(hit, dict):
+                    logger.debug(f"TB normalize: skipping non-dict hit: {type(hit).__name__}")
+                    continue
+
                 entry = hit.get('Entry', {})
-                if not entry:
+                if not isinstance(entry, dict) or not entry:
                     continue
 
                 languages = entry.get('Languages', [])
-                if not languages:
+                if not isinstance(languages, list) or not languages:
                     continue
 
                 # Find source and target language entries
@@ -139,10 +149,16 @@ def normalize_memoq_tb_response(memoq_response, src_lang: str = "eng", tgt_lang:
                 target_terms = []
 
                 for lang_entry in languages:
+                    if not isinstance(lang_entry, dict):
+                        continue
                     lang_code = lang_entry.get('Language', '').lower()
                     term_items = lang_entry.get('TermItems', [])
+                    if not isinstance(term_items, list):
+                        term_items = [term_items] if isinstance(term_items, dict) else []
 
                     for term_item in term_items:
+                        if not isinstance(term_item, dict):
+                            continue
                         term_text = term_item.get('Text', '').strip()
                         if not term_text:
                             continue
