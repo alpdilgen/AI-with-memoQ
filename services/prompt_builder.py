@@ -424,9 +424,14 @@ SEGMENTS TO TRANSLATE:
         history_text = self._format_chat_history(chat_history, max_items=10)
         
         # ===== 3. Format TM Context =====
-        # Per-segment TM matches are now embedded directly in %SEGMENTS%
-        # The global TM section is kept only for general style reference
+        # Per-segment TM matches are embedded in %SEGMENTS% for adaptation.
+        # A global TM style reference is ALSO kept in %EXAMPLES% so the LLM
+        # maintains consistent terminology/style even for segments without
+        # their own TM match.
         examples_text = ""
+        if tm_context:
+            unique_tm = self._deduplicate_tm(tm_context)
+            examples_text = self._format_tm_context(unique_tm, max_matches=15)
         
         # ===== 4. Format TB Context =====
         terms_text = ""
