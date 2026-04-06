@@ -788,22 +788,30 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                     logger.log(f"  [DIAG] TB languages from API: {tb_languages}")
 
                     if tb_languages and isinstance(tb_languages, list):
-                        # Build base code for matching: "en-us" → "en", "eng" → "eng", "eng-US" → "eng"
-                        src_base = src_code.lower().split('-')[0]
-                        tgt_base = tgt_code.lower().split('-')[0]
-                        # Also get 2-letter from 3-letter if needed
-                        _3to2 = config.ISO_TO_MEMOQ_LANG  # 2-letter → 3-letter
-                        _2to3 = {v.lower(): k for k, v in _3to2.items()}  # 3-letter → 2-letter
-                        src_base_alt = _2to3.get(src_base, src_base)
-                        tgt_base_alt = _2to3.get(tgt_base, tgt_base)
+                        # Build all equivalent base codes for matching
+                        # e.g., src_code="en-us" → src_bases={"en", "eng"}
+                        #        src_code="eng"   → src_bases={"eng", "en"}
+                        _2to3 = config.ISO_TO_MEMOQ_LANG  # {'en': 'eng', 'tr': 'tur', ...}
+                        _3to2 = {v.lower(): k for k, v in _2to3.items()}  # {'eng': 'en', 'tur': 'tr', ...}
+
+                        def _get_base_codes(code):
+                            """Get all equivalent base codes: en→{en,eng}, eng→{eng,en}"""
+                            base = code.lower().split('-')[0]
+                            codes = {base}
+                            if base in _2to3:
+                                codes.add(_2to3[base].lower())  # en → eng
+                            if base in _3to2:
+                                codes.add(_3to2[base])  # eng → en
+                            return codes
+
+                        src_bases = _get_base_codes(src_code)
+                        tgt_bases = _get_base_codes(tgt_code)
 
                         for tb_lang in tb_languages:
-                            tl = tb_lang.lower()
-                            tl_base = tl.split('-')[0]
-                            # Match src: compare base codes (en==en, eng==eng, or cross 2/3-letter)
-                            if tl_base == src_base or tl_base == src_base_alt:
+                            tl_base = tb_lang.lower().split('-')[0]
+                            if tl_base in src_bases:
                                 tb_src_lang = tb_lang
-                            elif tl_base == tgt_base or tl_base == tgt_base_alt:
+                            elif tl_base in tgt_bases:
                                 tb_tgt_lang = tb_lang
                     logger.log(f"  TB lang mapping: src={src_code} → {tb_src_lang}, tgt={tgt_code} → {tb_tgt_lang}")
                 except Exception as e:
@@ -912,9 +920,10 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                                             if not txt or ti.get('IsForbidden', False):
                                                 continue
                                             # Match language by comparing with TB's actual lang codes
-                                            if lang_code == tb_src_lang.lower() or lang_code.startswith(src_base):
+                                            lc_base = lang_code.split('-')[0]
+                                            if lang_code == tb_src_lang.lower() or lc_base in src_bases:
                                                 src_terms.append(txt)
-                                            elif lang_code == tb_tgt_lang.lower() or lang_code.startswith(tgt_base):
+                                            elif lang_code == tb_tgt_lang.lower() or lc_base in tgt_bases:
                                                 tgt_terms.append(txt)
 
                                     # Fallback: try flat SourceTerm/TargetTerm fields
