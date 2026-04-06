@@ -98,13 +98,13 @@ with st.sidebar:
     raw_detected_tgt = st.session_state.detected_languages.get('target')
 
     if raw_detected_src and raw_detected_tgt:
-        # Auto-detected: show as read-only info, store raw codes for API use
+        # Languages detected: show read-only with display names
         src_display = config.get_language_display_name(raw_detected_src)
         tgt_display = config.get_language_display_name(raw_detected_tgt)
 
-        st.text_input("Source Language", value=f"{src_display} ({raw_detected_src})", disabled=True)
-        st.text_input("Target Language", value=f"{tgt_display} ({raw_detected_tgt})", disabled=True)
-        st.caption("🔍 Auto-detected from uploaded file")
+        st.text_input("Source Language", value=f"{src_display}", disabled=True)
+        st.text_input("Target Language", value=f"{tgt_display}", disabled=True)
+        st.caption(f"🔍 Auto-detected: {raw_detected_src} → {raw_detected_tgt}")
 
         # Store raw codes — these will be used for TM/TB API calls
         src_code = raw_detected_src.lower()
@@ -117,25 +117,18 @@ with st.sidebar:
         src_code_3letter_base = src_code_3letter.split('-')[0] if src_code_3letter else 'eng'
         tgt_code_3letter_base = tgt_code_3letter.split('-')[0] if tgt_code_3letter else 'tur'
     else:
-        # No file uploaded yet: show manual selectbox as fallback
-        lang_keys = list(config.SUPPORTED_LANGUAGES.keys())
-        src_code = st.selectbox(
-            "Source Language",
-            lang_keys,
-            index=lang_keys.index('eng'),
-            format_func=lambda x: f"{config.SUPPORTED_LANGUAGES[x]} ({x})"
-        )
-        tgt_code = st.selectbox(
-            "Target Language",
-            lang_keys,
-            index=lang_keys.index('tur'),
-            format_func=lambda x: f"{config.SUPPORTED_LANGUAGES[x]} ({x})"
-        )
+        # No file uploaded yet: show empty disabled fields
+        st.text_input("Source Language", value="", disabled=True, placeholder="Upload a file to detect")
+        st.text_input("Target Language", value="", disabled=True, placeholder="Upload a file to detect")
         st.caption("📄 Upload a file to auto-detect languages")
-        src_code_3letter = src_code
-        tgt_code_3letter = src_code
-        src_code_3letter_base = src_code
-        tgt_code_3letter_base = tgt_code
+
+        # Default codes until file is uploaded
+        src_code = 'eng'
+        tgt_code = 'tur'
+        src_code_3letter = 'eng'
+        tgt_code_3letter = 'tur'
+        src_code_3letter_base = 'eng'
+        tgt_code_3letter_base = 'tur'
     
     st.divider()
     
