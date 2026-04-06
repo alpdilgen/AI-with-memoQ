@@ -9,6 +9,14 @@ The terms listed below come from the client's approved termbase. You MUST use th
 %TERMS%
 Avoid using the following terms in your translation (if any):
 %FORBIDDENTERMS%
+TM MATCH ADAPTATION RULES:
+Some segments below include a ">>> TM MATCH" line showing a previous translation from Translation Memory with a similarity percentage, followed by a ">>> TM SOURCE" line showing what the original source was. When you see these:
+- Use the TM match translation as your STARTING POINT. Do NOT translate the segment from scratch.
+- ADAPT the TM match to accurately translate the current source segment. Fix any differences between the TM source and the current source.
+- For high similarity matches (90%+), make only minimal necessary changes.
+- For lower similarity matches (70-89%), adapt more freely but still preserve reusable parts of the TM translation.
+- If the TM match is clearly irrelevant or misleading, you may translate from scratch.
+- Always apply the mandatory terminology rules above, even when adapting a TM match.
 Return only the translated text. Do not include explanations or comments in your response.
 OUTPUT FORMAT:
 [ID] Translated text

@@ -73,30 +73,28 @@ class PromptBuilder:
     def _get_default_template(self) -> str:
         """Default template with all placeholder sections"""
         return """You are a senior %SOURCELANG%-to-%TARGETLANG% translator with deep domain knowledge and fluency in product-related terminology. You will be provided with a text in %SOURCELANG% which you need to translate into %TARGETLANG%. Your translation must strictly preserve the original layout, formatting, and tags (e.g., {{1}}, {{2}}, etc.), while ensuring contextual and stylistic consistency across all lines.
-
 Translate with accuracy, fluency, and brand consistency.
-- Maintain the exact structure of the original document, including all specified tags such as {{1}}, {{2}} and any others exactly as they appear.
-- Do not add or remove any spaces, line breaks, paragraphs, or formatting elements.
-
+Maintain the exact structure of the original document, including all specified tags such as {{1}}, {{2}} and any others exactly as they appear.
+Do not add or remove any spaces, line breaks, paragraphs, or formatting elements.
 Use the examples provided below as reference for style and structure:
-
 %EXAMPLES%
-
-Apply terminology consistently. Use the approved terms listed below (if any). You might choose to avoid irrelevant terms or replace them with better alternatives if they truly improve the translation. However, when the choice is a matter of preference and the term is appropriate for the translation, stick to the provided one!
-
+TERMINOLOGY RULES (MANDATORY):
+The terms listed below come from the client's approved termbase. You MUST use these exact translations whenever the source term appears in the segment. Do not use synonyms, alternative translations, or paraphrases for these terms — the client requires these specific translations for consistency. Only deviate if the term is clearly irrelevant to the context of the segment.
 %TERMS%
-
 Avoid using the following terms in your translation (if any):
-
 %FORBIDDENTERMS%
-
+TM MATCH ADAPTATION RULES:
+Some segments below include a ">>> TM MATCH" line showing a previous translation from Translation Memory with a similarity percentage, followed by a ">>> TM SOURCE" line showing what the original source was. When you see these:
+- Use the TM match translation as your STARTING POINT. Do NOT translate the segment from scratch.
+- ADAPT the TM match to accurately translate the current source segment. Fix any differences between the TM source and the current source.
+- For high similarity matches (90%+), make only minimal necessary changes.
+- For lower similarity matches (70-89%), adapt more freely but still preserve reusable parts of the TM translation.
+- If the TM match is clearly irrelevant or misleading, you may translate from scratch.
+- Always apply the mandatory terminology rules above, even when adapting a TM match.
 Return only the translated text. Do not include explanations or comments in your response.
-
 OUTPUT FORMAT:
 [ID] Translated text
-
 SEGMENTS TO TRANSLATE:
-
 %SEGMENTS%
 """
     
@@ -341,20 +339,43 @@ SEGMENTS TO TRANSLATE:
         
         return f"STYLE REFERENCE:\n{reference_context}\n\n"
     
-    def _format_segments(self, segments: List[TranslationSegment]) -> str:
+    def _format_segments(self, segments: List[TranslationSegment],
+                         tm_context: Optional[Dict[str, List]] = None) -> str:
         """
-        Format segments for translation
-        
+        Format segments for translation, embedding per-segment TM matches
+
+        When a segment has a fuzzy TM match, the match is shown directly below
+        the segment so the LLM can adapt it rather than translating from scratch.
+
         Args:
             segments: List of TranslationSegment objects
-        
+            tm_context: Optional dict {segment_id: [TMMatch objects]}
+
         Returns:
             Formatted segment list for prompt
         """
         seg_text = ""
         for seg in segments:
             seg_text += f"[{seg.id}] {seg.source}\n"
-        
+
+            # Embed best TM match for this segment if available
+            if tm_context and seg.id in tm_context and tm_context[seg.id]:
+                best_match = None
+                best_similarity = 0
+
+                for match in tm_context[seg.id]:
+                    match_info = self._get_match_info(match)
+                    if match_info and match_info['similarity'] > best_similarity:
+                        best_match = match_info
+                        best_similarity = match_info['similarity']
+
+                if best_match and best_similarity > 0:
+                    seg_text += (
+                        f">>> TM MATCH ({best_match['similarity']}%): "
+                        f"{best_match['target']}\n"
+                        f">>> TM SOURCE: {best_match['source']}\n"
+                    )
+
         return seg_text
     
     def build_prompt(self,
@@ -403,12 +424,9 @@ SEGMENTS TO TRANSLATE:
         history_text = self._format_chat_history(chat_history, max_items=10)
         
         # ===== 3. Format TM Context =====
+        # Per-segment TM matches are now embedded directly in %SEGMENTS%
+        # The global TM section is kept only for general style reference
         examples_text = ""
-        if tm_context:
-            unique_tm = self._deduplicate_tm(tm_context)
-            examples_text = self._format_tm_context(unique_tm, max_matches=15)
-        else:
-            examples_text = "No Translation Memory matches available.\n\n"
         
         # ===== 4. Format TB Context =====
         terms_text = ""
@@ -421,8 +439,8 @@ SEGMENTS TO TRANSLATE:
         # ===== 5. Format DNT =====
         dnt_text = self._format_dnt_context(dnt_terms, max_terms=50)
         
-        # ===== 6. Format Segments =====
-        seg_text = self._format_segments(segments)
+        # ===== 6. Format Segments (with per-segment TM matches embedded) =====
+        seg_text = self._format_segments(segments, tm_context=tm_context)
         
         # ===== 7. Build Prompt from Template =====
         prompt = self.template
