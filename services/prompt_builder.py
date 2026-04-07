@@ -79,8 +79,8 @@ Do not add or remove any spaces, line breaks, paragraphs, or formatting elements
 Use the examples provided below as reference for style and structure:
 %EXAMPLES%
 TERMINOLOGY RULES (MANDATORY — HIGHEST PRIORITY):
-The terms listed below come from the client's approved termbase. You MUST use these EXACT CHARACTER SEQUENCES as the base form in your translation. Do not rephrase, restructure, or use alternative compound forms. For example, if the termbase says "variable frequency drive" = "değişken frekanslı sürücü", you MUST write "değişken frekanslı sürücü" — do NOT write "değişken frekans sürücüsü" or any other variant.
-You may ONLY add grammatical suffixes required by Turkish grammar (plural -lar/-ler, case endings -de/-da/-den/-dan/-ı/-i/-u/-ü, etc.) to the END of the approved term. The base form of the term must remain exactly as specified.
+The terms listed below come from the client's approved termbase. You MUST use these EXACT CHARACTER SEQUENCES as the base form in your translation. Do not rephrase, restructure, shorten, or use alternative compound forms of any approved term.
+You may ONLY add grammatical suffixes required by the target language (plural, case endings, possessive markers, etc.) to the END of the approved term. The base form of the term itself must remain exactly as specified in the termbase.
 %TERMS%
 Avoid using the following terms in your translation (if any):
 %FORBIDDENTERMS%
