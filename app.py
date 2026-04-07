@@ -567,6 +567,7 @@ def normalize_segment_for_matching(source_text: str) -> str:
 
 def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content=None, memoq_tm_guids=None, memoq_tb_guids=None):
     start_time = time.time()  # Track total processing duration
+    batch_size = st.session_state.batch_size
 
     # Initialize match scores tracking for memoQ metadata
     match_scores = {}
@@ -1009,7 +1010,7 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         # 6. Process LLM segments
         if llm_segments:
             status.update(label=f"Translating {len(llm_segments)} segments...", state="running")
-            
+
             llm_progress = st.progress(0)
             batch_translations_history = []
             
