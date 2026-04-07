@@ -316,7 +316,20 @@ Avoid using the following terms in your translation (if any):
 
 %FORBIDDENTERMS%
 
-Return only the translated text. Do not include explanations or comments in your response."""
+PER-SEGMENT CONTEXT:
+Some segments below include ">>> TERMS:" lines showing the specific approved terms for that segment. You MUST use these exact terms in the translation of that segment.
+Some segments also include ">>> TM MATCH (X%):" lines showing an existing translation memory match, followed by ">>> TM SOURCE:" showing the source that produced it. ADAPT the TM match to the current segment instead of translating from scratch:
+- 90%+ match: minimal edits, preserve almost everything
+- 70-89% match: adapt freely but reuse compatible portions
+- Below 70%: treat as reference only
+
+OUTPUT FORMAT (MANDATORY):
+Return one translation per line in this exact format:
+[ID] Translated text
+Do not include explanations, comments, quotation marks, or any text outside this format. Preserve every tag exactly: {{1}}, {{2}}, etc. Do not merge or split segments.
+
+SEGMENTS TO TRANSLATE:
+%SEGMENTS%"""
 
     @classmethod
     def generate(cls, 
