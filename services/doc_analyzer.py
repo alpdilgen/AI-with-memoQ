@@ -316,6 +316,7 @@ Avoid using the following terms in your translation (if any):
 
 %FORBIDDENTERMS%
 
+%NUMBER_FORMAT_RULES%
 PER-SEGMENT CONTEXT:
 Some segments below include ">>> TERMS:" lines showing the specific approved terms for that segment. You MUST use these exact terms in the translation of that segment.
 Some segments also include ">>> TM MATCH (X%):" lines showing an existing translation memory match, followed by ">>> TM SOURCE:" showing the source that produced it. ADAPT the TM match to the current segment instead of translating from scratch:
@@ -438,6 +439,36 @@ SEGMENTS TO TRANSLATE:
             forbidden_block = "\n".join(f"- {term}" for term in unique_forbidden)
             metadata['forbidden_terms_count'] = len(unique_forbidden)
         
+        # Build number format rules based on target language
+        # Locales using comma as decimal separator, dot/space as thousand separator
+        comma_decimal_langs = {
+            'turkish', 'german', 'french', 'spanish', 'italian', 'portuguese',
+            'dutch', 'polish', 'russian', 'czech', 'danish', 'finnish',
+            'swedish', 'norwegian', 'hungarian', 'romanian', 'bulgarian',
+            'greek', 'croatian', 'slovak', 'slovenian', 'ukrainian', 'serbian'
+        }
+        tgt_lower = (target_lang or "").lower()
+        if any(lang in tgt_lower for lang in comma_decimal_langs):
+            decimal_sep = "comma ','"
+            thousand_sep = "dot '.' or non-breaking space"
+            example = "1.234,56 or 1 234,56 (not 1,234.56)"
+        else:
+            decimal_sep = "dot '.'"
+            thousand_sep = "comma ','"
+            example = "1,234.56"
+
+        number_rules = (
+            "NUMBER FORMAT RULES (MANDATORY):\n"
+            f"- Target language decimal separator: {decimal_sep}\n"
+            f"- Target language thousand separator: {thousand_sep}\n"
+            f"- Example: {example}\n"
+            "- Convert source numbers to target locale format when they are regular numeric values.\n"
+            "- EXCEPTION: Do NOT modify parameter codes, error codes, model numbers, version strings, "
+            "or any alphanumeric identifiers (e.g., P1.05, E001, v2.3.1). Preserve their exact character sequence.\n"
+            "- When a parameter code appears at the end of a sentence, preserve it exactly as in the source; "
+            "do not append or remove a trailing period/dot.\n"
+        )
+
         # Replace placeholders
         prompt = template
         prompt = prompt.replace("%SOURCELANG%", source_lang)
@@ -445,6 +476,7 @@ SEGMENTS TO TRANSLATE:
         prompt = prompt.replace("%DOMAIN%", domain)
         prompt = prompt.replace("%STYLE_INSTRUCTIONS%", style_block)
         prompt = prompt.replace("%FORBIDDENTERMS%", forbidden_block)
+        prompt = prompt.replace("%NUMBER_FORMAT_RULES%", number_rules)
         
         # Keep CAT tool placeholders intact
         # %EXAMPLES%, %TERMS% stay as-is for the translation system
