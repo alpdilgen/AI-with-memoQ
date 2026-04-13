@@ -713,43 +713,73 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         # Segments that got bypassed by local TM should NOT go to memoQ
         segments_for_memoq = [s for s in segments_needing_tm if s.id not in {s2.id for s2 in bypass_segments}]
 
-        BATCH_SIZE = 50
+        TM_BATCH_SIZE = 20
+
+        def _apply_tm_results(results, batch_segs):
+            """Apply TM lookup results to segments — bypass or add context."""
+            if not results:
+                return
+            for idx, seg in enumerate(batch_segs):
+                if idx in results:
+                    tm_hits = results[idx]
+                    if tm_hits:
+                        best_hit = tm_hits[0]
+                        score = best_hit.similarity
+
+                        if score >= acceptance_threshold:
+                            bypass_segments.append(seg)
+                            final_translations[seg.id] = best_hit.target_text
+                            match_scores[seg.id] = score
+                        elif score >= match_threshold:
+                            existing_score = match_scores.get(seg.id, 0)
+                            if score > existing_score:
+                                tm_context[seg.id] = tm_hits
+                                match_scores[seg.id] = score
+
+        def _tm_lookup_with_retry(tm_guid, batch_segs):
+            """Try TM lookup; on failure retry with smaller sub-batches."""
+            normalized = [normalize_segment_for_matching(s.source) for s in batch_segs]
+            try:
+                results = memoq_client.lookup_segments(
+                    tm_guid, normalized,
+                    match_threshold=match_threshold
+                )
+                _apply_tm_results(results, batch_segs)
+                return
+            except Exception as e:
+                logger.log(f"memoQ TM batch error ({len(batch_segs)} segs): {e}")
+
+            # Retry with sub-batches of 10
+            SUB_BATCH = 10
+            for sub_start in range(0, len(batch_segs), SUB_BATCH):
+                sub_batch = batch_segs[sub_start:sub_start + SUB_BATCH]
+                sub_norm = [normalize_segment_for_matching(s.source) for s in sub_batch]
+                try:
+                    results = memoq_client.lookup_segments(
+                        tm_guid, sub_norm,
+                        match_threshold=match_threshold
+                    )
+                    _apply_tm_results(results, sub_batch)
+                except Exception as e2:
+                    logger.log(f"memoQ TM sub-batch error ({len(sub_batch)} segs): {e2}")
+                    # Last resort: try individual segments
+                    for single_seg in sub_batch:
+                        try:
+                            results = memoq_client.lookup_segments(
+                                tm_guid, [normalize_segment_for_matching(single_seg.source)],
+                                match_threshold=match_threshold
+                            )
+                            _apply_tm_results(results, [single_seg])
+                        except Exception as e3:
+                            logger.log(f"memoQ TM single seg [{single_seg.id}] error: {e3}")
 
         if memoq_client and memoq_tm_guids and segments_for_memoq:
             for tm_guid in memoq_tm_guids:
                 remaining = [s for s in segments_for_memoq if s.id not in {s2.id for s2 in bypass_segments} or s.id in tm_context]
 
-                for batch_start in range(0, len(remaining), BATCH_SIZE):
-                    batch = remaining[batch_start:batch_start + BATCH_SIZE]
-                    normalized_sources = [normalize_segment_for_matching(s.source) for s in batch]
-
-                    try:
-                        results = memoq_client.lookup_segments(
-                            tm_guid, normalized_sources,
-                            match_threshold=match_threshold,
-                            src_lang=src_code, tgt_lang=tgt_code
-                        )
-
-                        if results:
-                            for idx, seg in enumerate(batch):
-                                if idx in results:
-                                    tm_hits = results[idx]
-                                    if tm_hits:
-                                        best_hit = tm_hits[0]
-                                        score = best_hit.similarity
-
-                                        if score >= acceptance_threshold:
-                                            bypass_segments.append(seg)
-                                            final_translations[seg.id] = best_hit.target_text
-                                            match_scores[seg.id] = score
-                                        elif score >= match_threshold:
-                                            # Only update if memoQ has better match than local TM
-                                            existing_score = match_scores.get(seg.id, 0)
-                                            if score > existing_score:
-                                                tm_context[seg.id] = tm_hits
-                                                match_scores[seg.id] = score
-                    except Exception as e:
-                        logger.log(f"memoQ TM batch lookup error: {e}")
+                for batch_start in range(0, len(remaining), TM_BATCH_SIZE):
+                    batch = remaining[batch_start:batch_start + TM_BATCH_SIZE]
+                    _tm_lookup_with_retry(tm_guid, batch)
 
                     progress = 0.3 + (batch_start + len(batch)) / max(len(remaining), 1) * 0.3
                     analysis_progress.progress(min(progress, 0.6))
@@ -937,13 +967,30 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                                         if tt_val:
                                             tgt_terms = [tt_val]
 
+                                    # Stopwords that produce noise TB matches
+                                    _TB_STOPWORDS = {
+                                        'a', 'an', 'the', 'to', 'of', 'in', 'on', 'at',
+                                        'by', 'or', 'is', 'it', 'as', 'no', 'do', 'if',
+                                        'so', 'up', 'be', 'we', 'he', 'me', 'my', 'us',
+                                    }
+
                                     for src_t in src_terms:
                                         for tt in tgt_terms:
-                                            pair_key = (src_t.lower().strip(), tt.lower().strip())
+                                            s_clean = src_t.strip()
+                                            t_clean = tt.strip()
+                                            s_lower = s_clean.lower()
+                                            # Filter junk: single chars, identical pairs, stopwords
+                                            if len(s_clean) <= 1:
+                                                continue
+                                            if s_lower == t_clean.lower():
+                                                continue
+                                            if s_lower in _TB_STOPWORDS:
+                                                continue
+                                            pair_key = (s_lower, t_clean.lower())
                                             if pair_key not in seen_pairs and pair_key[0] and pair_key[1]:
                                                 seen_pairs.add(pair_key)
                                                 found_terms.append(TermMatch(
-                                                    source=src_t.strip(), target=tt.strip(),
+                                                    source=s_clean, target=t_clean,
                                                     source_language=src_code,
                                                     target_language=tgt_code
                                                 ))
