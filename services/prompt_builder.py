@@ -436,15 +436,11 @@ SEGMENTS TO TRANSLATE:
         # ===== 2. Format Chat History =====
         history_text = self._format_chat_history(chat_history, max_items=10)
         
-        # ===== 3. Format TM Context =====
-        # Per-segment TM matches are embedded in %SEGMENTS% for adaptation.
-        # A global TM style reference is ALSO kept in %EXAMPLES% so the LLM
-        # maintains consistent terminology/style even for segments without
-        # their own TM match.
+        # ===== 3. TM Context =====
+        # Per-segment TM matches are embedded inline in %SEGMENTS% (>>> TM MATCH).
+        # We do NOT duplicate them as global examples in %EXAMPLES% — that would
+        # show the same information twice and waste tokens.
         examples_text = ""
-        if tm_context:
-            unique_tm = self._deduplicate_tm(tm_context)
-            examples_text = self._format_tm_context(unique_tm, max_matches=15)
         
         # ===== 4. Format TB Context =====
         terms_text = ""
@@ -474,16 +470,8 @@ SEGMENTS TO TRANSLATE:
         prompt = prompt.replace("%EXAMPLES%", combined_examples)
         prompt = prompt.replace("%TERMS%", terms_text)
         
-        # Handle DNT section
-        if dnt_text:
-            # Replace placeholder
-            prompt = prompt.replace(
-                "Avoid using the following terms in your translation (if any):\n\n",
-                f"Avoid using the following terms in your translation (if any):\n\n{dnt_text}"
-            )
-            prompt = prompt.replace("%FORBIDDENTERMS%", dnt_text)
-        else:
-            prompt = prompt.replace("%FORBIDDENTERMS%", "")
+        # Handle DNT section — only replace the placeholder, not literal text
+        prompt = prompt.replace("%FORBIDDENTERMS%", dnt_text if dnt_text else "")
         
         # Replace segments
         prompt = prompt.replace("%SEGMENTS%", seg_text)

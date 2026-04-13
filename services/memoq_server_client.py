@@ -406,9 +406,7 @@ class MemoQServerClient:
         self,
         tm_guid: str,
         segments: List[str],
-        match_threshold: int = 70,
-        src_lang: Optional[str] = None,
-        tgt_lang: Optional[str] = None
+        match_threshold: int = 70
     ) -> Dict:
         """
         Lookup segments in Translation Memory
@@ -417,15 +415,14 @@ class MemoQServerClient:
             tm_guid: Translation Memory GUID
             segments: List of source segments to lookup
             match_threshold: Minimum match percentage (50-102)
-            src_lang: Source language code (e.g., 'eng')
-            tgt_lang: Target language code (e.g., 'tur')
 
         Returns:
             Dict with normalized TMMatch objects: {segment_index: [TMMatch objects]}
         """
-        # Don't clean segments - keep original text for accurate matching
-        # Build correct payload according to memoQ API v1 documentation
-        # IMPORTANT: Segments must be wrapped in <seg> XML tags
+        # Build payload per memoQ API v1 spec for lookupsegments.
+        # NOTE: SourceLanguage/TargetLanguage are NOT valid fields for this
+        # endpoint (they belong to TB lookupterms). The TM already knows
+        # its language pair from its definition.
         payload = {
             "Segments": [
                 {"Segment": f"<seg>{seg}</seg>"}
@@ -433,7 +430,7 @@ class MemoQServerClient:
             ],
             "Options": {
                 "MatchThreshold": match_threshold,
-                "AdjustFuzzyMatches": False,
+                "AdjustFuzzyMatches": True,
                 "InlineTagStrictness": 2,
                 "OnlyBest": False,
                 "OnlyUnambiguous": False,
@@ -441,20 +438,12 @@ class MemoQServerClient:
                 "ReverseLookup": False
             }
         }
-
-        # Add language filtering if provided
-        if src_lang:
-            payload["SourceLanguage"] = src_lang
-        if tgt_lang:
-            payload["TargetLanguage"] = tgt_lang
         
         endpoint = f"/tms/{tm_guid}/lookupsegments"
 
         try:
-            logger.info(f"🔍 TM LOOKUP REQUEST:")
+            logger.info(f"TM LOOKUP REQUEST:")
             logger.info(f"  TM GUID: {tm_guid}")
-            logger.info(f"  Source Lang: {src_lang}")
-            logger.info(f"  Target Lang: {tgt_lang}")
             logger.info(f"  Segments count: {len(segments)}")
             logger.info(f"  Match threshold: {match_threshold}")
             logger.debug(f"  Full payload: {payload}")
