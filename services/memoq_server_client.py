@@ -406,7 +406,10 @@ class MemoQServerClient:
         self,
         tm_guid: str,
         segments: List[str],
-        match_threshold: int = 70
+        match_threshold: int = 70,
+        src_lang: Optional[str] = None,
+        tgt_lang: Optional[str] = None,
+        context_info: Optional[List[Dict]] = None
     ) -> Dict:
         """
         Lookup segments in Translation Memory
@@ -415,22 +418,35 @@ class MemoQServerClient:
             tm_guid: Translation Memory GUID
             segments: List of source segments to lookup
             match_threshold: Minimum match percentage (50-102)
+            src_lang: Source language code (e.g., 'eng')
+            tgt_lang: Target language code (e.g., 'tur')
+            context_info: Optional list of dicts with context for each segment:
+                          [{"preceding": "prev text", "following": "next text"}, ...]
+                          Enables 101% context matching in memoQ TM.
 
         Returns:
             Dict with normalized TMMatch objects: {segment_index: [TMMatch objects]}
         """
-        # Build payload per memoQ API v1 spec for lookupsegments.
-        # NOTE: SourceLanguage/TargetLanguage are NOT valid fields for this
-        # endpoint (they belong to TB lookupterms). The TM already knows
-        # its language pair from its definition.
+        # Build payload according to memoQ API v1 documentation
+        # IMPORTANT: Segments must be wrapped in <seg> XML tags
+        # Context fields (PrecedingSegment, FollowingSegment) enable 101% context matches
+        segment_entries = []
+        for i, seg in enumerate(segments):
+            entry = {"Segment": f"<seg>{seg}</seg>"}
+            # Add context info if available for this segment
+            if context_info and i < len(context_info) and context_info[i]:
+                ctx = context_info[i]
+                if ctx.get("preceding"):
+                    entry["PrecedingSegment"] = f"<seg>{ctx['preceding']}</seg>"
+                if ctx.get("following"):
+                    entry["FollowingSegment"] = f"<seg>{ctx['following']}</seg>"
+            segment_entries.append(entry)
+
         payload = {
-            "Segments": [
-                {"Segment": f"<seg>{seg}</seg>"}
-                for seg in segments
-            ],
+            "Segments": segment_entries,
             "Options": {
                 "MatchThreshold": match_threshold,
-                "AdjustFuzzyMatches": True,
+                "AdjustFuzzyMatches": False,
                 "InlineTagStrictness": 2,
                 "OnlyBest": False,
                 "OnlyUnambiguous": False,
@@ -438,12 +454,20 @@ class MemoQServerClient:
                 "ReverseLookup": False
             }
         }
+
+        # Add language filtering if provided
+        if src_lang:
+            payload["SourceLanguage"] = src_lang
+        if tgt_lang:
+            payload["TargetLanguage"] = tgt_lang
         
         endpoint = f"/tms/{tm_guid}/lookupsegments"
 
         try:
-            logger.info(f"TM LOOKUP REQUEST:")
+            logger.info(f"🔍 TM LOOKUP REQUEST:")
             logger.info(f"  TM GUID: {tm_guid}")
+            logger.info(f"  Source Lang: {src_lang}")
+            logger.info(f"  Target Lang: {tgt_lang}")
             logger.info(f"  Segments count: {len(segments)}")
             logger.info(f"  Match threshold: {match_threshold}")
             logger.debug(f"  Full payload: {payload}")
