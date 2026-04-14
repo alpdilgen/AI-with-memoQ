@@ -13,6 +13,8 @@ class TranslationSegment:
     source: str
     target: str = ""
     tag_map: Optional[dict] = None
+    preceding_source: Optional[str] = None
+    following_source: Optional[str] = None
 
 
 @dataclass
