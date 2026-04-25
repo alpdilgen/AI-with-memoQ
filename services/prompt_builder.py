@@ -473,3 +473,31 @@ SEGMENTS TO TRANSLATE:
         # Replace context sections
         # Combine reference + history + examples
         combined_examples = reference_text + history_text + examples_text
+        
+        prompt = prompt.replace("%EXAMPLES%", combined_examples)
+        prompt = prompt.replace("%TERMS%", terms_text)
+        
+        # Handle DNT section — only replace the placeholder, not literal text
+        prompt = prompt.replace("%FORBIDDENTERMS%", dnt_text if dnt_text else "")
+        
+        # Replace segments
+        prompt = prompt.replace("%SEGMENTS%", seg_text)
+        
+        # ===== 8. Log Prompt Statistics =====
+        prompt_stats = {
+            'total_chars': len(prompt),
+            'segments': len(segments),
+            'tm_matches': sum(len(m) for m in tm_context.values() if m) if tm_context else 0,
+            'tb_terms': sum(len(t) for t in tb_context.values() if t) if tb_context else 0,
+            'dnt_terms': len(dnt_terms) if dnt_terms else 0,
+            'history_items': len(chat_history) if chat_history else 0
+        }
+        
+        logger.info(
+            f"Prompt built: {prompt_stats['total_chars']} chars, "
+            f"TM={prompt_stats['tm_matches']}, "
+            f"TB={prompt_stats['tb_terms']}, "
+            f"DNT={prompt_stats['dnt_terms']}"
+        )
+        
+        return prompt
