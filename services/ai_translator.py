@@ -40,4 +40,15 @@ class AITranslator:
 
             elif self.provider == "Anthropic":
                 response = self.client.messages.create(
-                    model=sel
+                    model=self.model,
+                    max_tokens=8192,
+                    temperature=0.1,
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ]
+                )
+                return response.content[0].text, response.usage.input_tokens + response.usage.output_tokens
+
+        except Exception as e:
+            print(f"AI API Error ({type(e).__name__}): {e}")
+            raise e
