@@ -1114,6 +1114,14 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                     dnt_terms=dnt_terms
                 )
                 
+                # Defensive guard: prompt must be a non-empty string
+                if not isinstance(prompt, str) or not prompt.strip():
+                    st.error(f"❌ Prompt build failed for batch {batch_num}: prompt is {type(prompt).__name__} = {repr(prompt[:200] if prompt else prompt)}")
+                    logger.log(f"ERROR: Batch {batch_num} - prompt is None or empty, skipping")
+                    for seg in batch:
+                        match_scores[seg.id] = 0
+                    continue
+
                 try:
                     st.write("🔄 Calling LLM API...")
                     response_text, tokens = translator.translate_batch(prompt)
