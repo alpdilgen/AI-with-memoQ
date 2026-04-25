@@ -816,9 +816,9 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                 seen_pairs = set()
                 diag_logged = 0
 
-                batch_size = 50
-                for batch_start in range(0, len(search_ngrams), batch_size):
-                    batch = search_ngrams[batch_start:batch_start + batch_size]
+                ngram_batch_size = 50
+                for batch_start in range(0, len(search_ngrams), ngram_batch_size):
+                    batch = search_ngrams[batch_start:batch_start + ngram_batch_size]
                     seg_list = [f"<seg>{ng}</seg>" for ng in batch]
                     payload = {
                         "SourceLanguage": tb_src_lang,
@@ -995,7 +995,8 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         
         st.session_state.bypass_stats = {
             'bypassed': len(bypass_segments),
-            'llm_sent': len(llm_segments)
+            'llm_sent': len(llm_segments),
+            'total_segments': total_segments
         }
         
         st.write(f"✅ **{len(bypass_segments)}** segments from TM (≥{acceptance_threshold}% match)")
@@ -1005,16 +1006,14 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         logger.log_tm_matches(tm_context)
         logger.log_tb_matches(tb_context)
         
-        # IMPROVEMENT: Reorder LLM segments - process WITH context first
-        # This builds chat history early for better translation consistency
+        # Log TM/non-TM segment distribution (no reordering — keep original document order)
+        # Reordering was removed: mixing TM-context and non-context segments in the same batch
+        # caused the LLM to only translate TM-context segments and skip the rest.
         segments_with_context = [s for s in llm_segments if s.id in tm_context]
         segments_no_context = [s for s in llm_segments if s.id not in tm_context]
         
-        original_count = len(llm_segments)
-        llm_segments = segments_with_context + segments_no_context
-        
-        logger.log(f"Segments reordered: {len(segments_with_context)} with TM context, {len(segments_no_context)} without")
-        logger.log(f"Processing order optimized for better consistency")
+        logger.log(f"Segments: {len(segments_with_context)} with TM context, {len(segments_no_context)} without")
+        logger.log(f"Processing in original document order")
         
         # 6. Process LLM segments
         if llm_segments:
@@ -1430,7 +1429,7 @@ with tab2:
         
         col_stat1, col_stat2, col_stat3 = st.columns(3)
         with col_stat1:
-            st.metric("Total Segments", len(st.session_state.translation_results))
+            st.metric("Total Segments", st.session_state.bypass_stats.get('total_segments', len(st.session_state.translation_results)))
         with col_stat2:
             bypassed = st.session_state.bypass_stats.get('bypassed', 0)
             st.metric(f"From TM (≥{acceptance_threshold}%)", bypassed)
