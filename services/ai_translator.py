@@ -19,6 +19,11 @@ class AITranslator:
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=2, max=10))
     def translate_batch(self, prompt: str):
         """Sends prompt to AI with retries"""
+        # Debug guard — catch None prompt before it reaches the API
+        if not isinstance(prompt, str):
+            raise ValueError(f"translate_batch received non-string prompt: type={type(prompt).__name__}, value={repr(prompt)}")
+        if not prompt.strip():
+            raise ValueError(f"translate_batch received empty/whitespace prompt (len={len(prompt)})")
         try:
             if self.provider == "OpenAI":
                 is_reasoning = any(self.model.startswith(r) for r in REASONING_MODELS)
@@ -42,13 +47,4 @@ class AITranslator:
                 response = self.client.messages.create(
                     model=self.model,
                     max_tokens=8192,
-                    temperature=0.1,
-                    messages=[
-                        {"role": "user", "content": prompt}
-                    ]
-                )
-                return response.content[0].text, response.usage.input_tokens + response.usage.output_tokens
-
-        except Exception as e:
-            print(f"AI API Error ({type(e).__name__}): {e}")
-            raise e
+                  
