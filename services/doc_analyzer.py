@@ -305,24 +305,27 @@ Translate with accuracy, fluency, and brand consistency.
 %STYLE_INSTRUCTIONS%
 
 Use the examples provided below as reference for style and structure:
-
 %EXAMPLES%
-
-Apply terminology consistently. Use the approved terms listed below (if any). You might choose to avoid irrelevant terms or replace them with better alternatives if they truly improve the translation. However, when the choice is a matter of preference and the term is appropriate for the translation, stick to the provided one!
-
+TERMINOLOGY RULES (MANDATORY — HIGHEST PRIORITY):
+Every term listed below comes from the client's approved termbase. You MUST use ALL of them in your translation — there are no optional terms. Every approved term that appears in a source segment MUST appear in the corresponding translation. Omitting any approved term is not permitted.
+The approved term is the required BASE FORM. You must preserve this base form exactly — do not rephrase, restructure, shorten, or substitute it with alternative forms.
+You are permitted to make ONLY the following grammatical adaptations, and nothing else:
+- Add inflectional suffixes to the END of the term (plural markers, case endings, possessive markers, verb conjugation endings, agglutinative suffixes, etc.) as required by %TARGETLANG% grammar.
+- Prepend grammatical articles (definite or indefinite) BEFORE the term where %TARGETLANG% grammar requires them (e.g., "der/die/das" in German, "le/la/les" in French, "el/la/los/las" in Spanish, "il/la/i/le" in Italian, etc.).
+- Apply gender agreement to articles and any adjectives that directly modify the term, following the grammatical gender of the term in %TARGETLANG%.
+- Apply case-driven changes to articles or preceding prepositions required by the syntactic role of the term in the sentence (e.g., German preposition-article contractions such as "im", "zum", "vom").
+The base form of the approved term itself must remain exactly as specified. Only the surrounding grammatical elements and word endings may change.
 %TERMS%
-
-Avoid using the following terms in your translation (if any):
-
+Keep the following terms in their original source language form — do not translate them:
 %FORBIDDENTERMS%
-
 %NUMBER_FORMAT_RULES%
 PER-SEGMENT CONTEXT:
-Some segments below include ">>> TERMS:" lines showing the specific approved terms for that segment. You MUST use these exact terms in the translation of that segment.
+Some segments below include ">>> TERMS:" lines listing the approved termbase terms that appear in that segment. Every one of these terms MUST be used in your translation of that segment — all of them, without exception, with only the grammatical adaptations described above.
 Some segments also include ">>> TM MATCH (X%):" lines showing an existing translation memory match, followed by ">>> TM SOURCE:" showing the source that produced it. ADAPT the TM match to the current segment instead of translating from scratch:
 - 90%+ match: minimal edits, preserve almost everything
 - 70-89% match: adapt freely but reuse compatible portions
 - Below 70%: treat as reference only
+- Always apply all mandatory terminology rules, even when adapting a TM match.
 
 OUTPUT FORMAT (MANDATORY):
 Return one translation per line in this exact format:
@@ -454,31 +457,4 @@ SEGMENTS TO TRANSLATE:
             example = "1.234,56 or 1 234,56 (not 1,234.56)"
         else:
             decimal_sep = "dot '.'"
-            thousand_sep = "comma ','"
-            example = "1,234.56"
-
-        number_rules = (
-            "NUMBER FORMAT RULES (MANDATORY):\n"
-            f"- Target language decimal separator: {decimal_sep}\n"
-            f"- Target language thousand separator: {thousand_sep}\n"
-            f"- Example: {example}\n"
-            "- Convert source numbers to target locale format when they are regular numeric values.\n"
-            "- EXCEPTION: Do NOT modify parameter codes, error codes, model numbers, version strings, "
-            "or any alphanumeric identifiers (e.g., P1.05, E001, v2.3.1). Preserve their exact character sequence.\n"
-            "- When a parameter code appears at the end of a sentence, preserve it exactly as in the source; "
-            "do not append or remove a trailing period/dot.\n"
-        )
-
-        # Replace placeholders
-        prompt = template
-        prompt = prompt.replace("%SOURCELANG%", source_lang)
-        prompt = prompt.replace("%TARGETLANG%", target_lang)
-        prompt = prompt.replace("%DOMAIN%", domain)
-        prompt = prompt.replace("%STYLE_INSTRUCTIONS%", style_block)
-        prompt = prompt.replace("%FORBIDDENTERMS%", forbidden_block)
-        prompt = prompt.replace("%NUMBER_FORMAT_RULES%", number_rules)
-        
-        # Keep CAT tool placeholders intact
-        # %EXAMPLES%, %TERMS% stay as-is for the translation system
-        
-        return prompt, metadata
+            thousand_sep = "comma
