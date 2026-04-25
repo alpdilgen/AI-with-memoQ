@@ -457,4 +457,31 @@ SEGMENTS TO TRANSLATE:
             example = "1.234,56 or 1 234,56 (not 1,234.56)"
         else:
             decimal_sep = "dot '.'"
-            thousand_sep = "comma
+            thousand_sep = "comma ','"
+            example = "1,234.56"
+
+        number_rules = (
+            "NUMBER FORMAT RULES (MANDATORY):\n"
+            f"- Target language decimal separator: {decimal_sep}\n"
+            f"- Target language thousand separator: {thousand_sep}\n"
+            f"- Example: {example}\n"
+            "- Convert source numbers to target locale format when they are regular numeric values.\n"
+            "- EXCEPTION: Do NOT modify parameter codes, error codes, model numbers, version strings, "
+            "or any alphanumeric identifiers (e.g., P1.05, E001, v2.3.1). Preserve their exact character sequence.\n"
+            "- When a parameter code appears at the end of a sentence, preserve it exactly as in the source; "
+            "do not append or remove a trailing period/dot.\n"
+        )
+
+        # Replace placeholders
+        prompt = template
+        prompt = prompt.replace("%SOURCELANG%", source_lang)
+        prompt = prompt.replace("%TARGETLANG%", target_lang)
+        prompt = prompt.replace("%DOMAIN%", domain)
+        prompt = prompt.replace("%STYLE_INSTRUCTIONS%", style_block)
+        prompt = prompt.replace("%FORBIDDENTERMS%", forbidden_block)
+        prompt = prompt.replace("%NUMBER_FORMAT_RULES%", number_rules)
+
+        # Keep CAT tool placeholders intact
+        # %EXAMPLES%, %TERMS% stay as-is for the translation system
+
+        return prompt, metadata
