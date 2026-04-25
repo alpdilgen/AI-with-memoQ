@@ -91,114 +91,104 @@ def normalize_memoq_tb_response(memoq_response, src_lang: str = "eng", tgt_lang:
     """
     Convert memoQ TB API response to standard TermMatch objects.
 
-    The memoQ TB lookup response is a LIST (not dict), where each item has TBHits.
-    Each TBHit has an Entry with Languages array containing TermItems.
+    The memoQ TB lookupterms response structure:
+        {"Result": [{"TBHits": [[hit, ...], [hit, ...], ...]}, ...]}
+    TBHits is a 2D array (TBHit[][]) per the memoQ API spec: outer index is the term
+    position matched within the segment, inner index is the matching TB entry.
+    Each TBHit contains SourceTerm and TargetTerm directly, plus a full Entry.
 
     Args:
-        memoq_response: Raw response from memoQ Server TB lookup (list or dict)
+        memoq_response: Raw response from memoQ Server TB lookup
         src_lang: Source language code (e.g., 'eng')
         tgt_lang: Target language code (e.g., 'tur')
 
     Returns:
-        List of TermMatch objects
+        List of TermMatch objects (forbidden terms excluded)
     """
     from models.entities import TermMatch
 
     terms = []
-    seen = set()  # Deduplicate
+    seen = set()
 
     try:
-        # Response can be a list (direct) or dict with 'Result' key
-        if isinstance(memoq_response, list):
-            result_list = memoq_response
-        elif isinstance(memoq_response, dict):
-            result_list = memoq_response.get('Result', memoq_response.get('result', []))
-            if not isinstance(result_list, list):
-                result_list = [result_list]
+        # Response is always {"Result": [...]} per API spec
+        if isinstance(memoq_response, dict):
+            result_list = memoq_response.get('Result', [])
+        elif isinstance(memoq_response, list):
+            result_list = memoq_response  # Fallback for non-standard response
         else:
             logger.warning(f"Unexpected TB response type: {type(memoq_response)}")
             return []
 
-        print(f"[TB NORMALIZE] result_list has {len(result_list)} items, types: {[type(x).__name__ for x in result_list[:3]]}")
+        logger.debug(f"TB normalize: {len(result_list)} segment results")
 
         for segment_result in result_list:
             if not isinstance(segment_result, dict):
-                print(f"[TB NORMALIZE] skipping non-dict segment_result: {type(segment_result).__name__}, value: {str(segment_result)[:200]}")
                 continue
 
-            tb_hits = segment_result.get('TBHits', [])
-            if not isinstance(tb_hits, list):
-                print(f"[TB NORMALIZE] TBHits is not a list: {type(tb_hits).__name__}, value: {str(tb_hits)[:200]}")
-                tb_hits = [tb_hits] if isinstance(tb_hits, dict) else []
+            # TBHits is TBHit[][] — a 2D array per the memoQ API spec
+            tb_hits_2d = segment_result.get('TBHits', [])
+            if not isinstance(tb_hits_2d, list):
+                continue
 
-            for hit in tb_hits:
-                if not isinstance(hit, dict):
-                    print(f"[TB NORMALIZE] skipping non-dict hit: {type(hit).__name__}, value: {str(hit)[:200]}")
-                    continue
+            for inner_hits in tb_hits_2d:
+                # Each outer element is an array of hits for one matched term position
+                if not isinstance(inner_hits, list):
+                    inner_hits = [inner_hits] if isinstance(inner_hits, dict) else []
 
-                entry = hit.get('Entry', {})
-                if not isinstance(entry, dict) or not entry:
-                    continue
-
-                languages = entry.get('Languages', [])
-                if not isinstance(languages, list) or not languages:
-                    continue
-
-                # Find source and target language entries
-                source_terms = []
-                target_terms = []
-
-                for lang_entry in languages:
-                    if not isinstance(lang_entry, dict):
+                for hit in inner_hits:
+                    if not isinstance(hit, dict):
                         continue
-                    lang_code = lang_entry.get('Language', '').lower()
-                    term_items = lang_entry.get('TermItems', [])
-                    if not isinstance(term_items, list):
-                        term_items = [term_items] if isinstance(term_items, dict) else []
 
-                    for term_item in term_items:
-                        if not isinstance(term_item, dict):
-                            continue
-                        term_text = term_item.get('Text', '').strip()
-                        if not term_text:
-                            continue
+                    # SourceTerm and TargetTerm are provided directly in the hit
+                    source_term = hit.get('SourceTerm', '').strip()
+                    target_term = hit.get('TargetTerm', '').strip()
 
-                        is_forbidden = term_item.get('IsForbidden', False)
-                        if is_forbidden:
-                            continue
+                    if not source_term or not target_term:
+                        continue
 
-                        if lang_code == src_lang.lower() or lang_code.startswith(src_lang.lower()[:3]):
-                            source_terms.append(term_text)
-                        elif lang_code == tgt_lang.lower() or lang_code.startswith(tgt_lang.lower()[:3]):
-                            target_terms.append(term_text)
+                    # Check IsForbidden on the specific target TermItem via Entry
+                    is_forbidden = False
+                    entry = hit.get('Entry', {})
+                    if isinstance(entry, dict):
+                        for lang_entry in entry.get('Languages', []):
+                            if not isinstance(lang_entry, dict):
+                                continue
+                            lang_code = lang_entry.get('Language', '').lower()
+                            if not lang_code.startswith(tgt_lang.lower()[:3]):
+                                continue
+                            for term_item in lang_entry.get('TermItems', []):
+                                if not isinstance(term_item, dict):
+                                    continue
+                                if term_item.get('Text', '').strip() == target_term:
+                                    is_forbidden = term_item.get('IsForbidden', False)
+                                    break
+                    if is_forbidden:
+                        logger.debug(f"TB: skipping forbidden term: {source_term} → {target_term}")
+                        continue
 
-                # Create TermMatch for each source-target pair
-                for src_term in source_terms:
-                    for tgt_term in target_terms:
-                        pair_key = (src_term.lower(), tgt_term.lower())
-                        if pair_key in seen:
-                            continue
-                        seen.add(pair_key)
+                    pair_key = (source_term.lower(), target_term.lower())
+                    if pair_key in seen:
+                        continue
+                    seen.add(pair_key)
 
-                        try:
-                            term = TermMatch(
-                                source=src_term,
-                                target=tgt_term,
-                                source_language=src_lang,
-                                target_language=tgt_lang
-                            )
-                            terms.append(term)
-                            logger.debug(f"TB term: {src_term} = {tgt_term}")
-                        except Exception as e:
-                            logger.warning(f"Invalid TermMatch: {e}")
-                            continue
+                    try:
+                        term = TermMatch(
+                            source=source_term,
+                            target=target_term,
+                            source_language=src_lang,
+                            target_language=tgt_lang
+                        )
+                        terms.append(term)
+                        logger.debug(f"TB term: {source_term} → {target_term}")
+                    except Exception as e:
+                        logger.warning(f"Invalid TermMatch: {e}")
 
     except Exception as e:
-        print(f"[TB NORMALIZE] EXCEPTION: {e}")
         logger.error(f"Error normalizing memoQ TB response: {e}")
         return []
 
-    print(f"[TB NORMALIZE] returning {len(terms)} terms")
+    logger.debug(f"TB normalize: returning {len(terms)} terms")
     return terms
 
 
@@ -293,51 +283,43 @@ class MemoQServerClient:
             raise Exception("Authentication failed")
         
         url = f"{self.server_url}{self.base_path}{endpoint}"
-        
-        request_params = {"authToken": self.token}
-        if params:
-            request_params.update(params)
-        
+
+        # Use Authorization header (best practice per memoQ API docs)
+        # instead of ?authToken= query parameter
         headers = {
             "Content-Type": "application/json",
-            "Accept": "application/json"
+            "Accept": "application/json",
+            "Authorization": f"MQS-API {self.token}"
         }
-        
+
         try:
             if method == "GET":
                 response = requests.get(
                     url,
-                    params=request_params,
+                    params=params,
                     headers=headers,
                     verify=self.verify_ssl,
                     timeout=self.timeout
                 )
             elif method == "POST":
-                logger.debug(f"POST URL: {url}")
-                logger.debug(f"POST Params: {request_params}")
-                logger.debug(f"POST Data: {data}")
+                logger.debug(f"POST {url}")
+                logger.debug(f"POST data: {data}")
                 response = requests.post(
                     url,
                     json=data,
-                    params=request_params,
+                    params=params,
                     headers=headers,
                     verify=self.verify_ssl,
                     timeout=self.timeout
                 )
             else:
                 raise ValueError(f"Unsupported method: {method}")
-            
-            logger.debug(f"Response Status: {response.status_code}")
-            logger.debug(f"Response Text: {response.text}")
-            
+
+            logger.debug(f"Response {response.status_code}: {response.text[:500]}")
+
             response.raise_for_status()
-            result = response.json()
-            # Print diagnostic for TB lookupterms endpoint
-            if "lookupterms" in endpoint:
-                print(f"[_make_request] TB response status: {response.status_code}, body length: {len(response.text)}")
-                print(f"[_make_request] TB response first 1000 chars: {response.text[:1000]}")
-            return result
-            
+            return response.json()
+
         except requests.exceptions.HTTPError as e:
             error_code = "Unknown"
             error_msg = str(e)
@@ -355,13 +337,13 @@ class MemoQServerClient:
                 self.token = None
                 self.token_expiry = None
                 if self.login():
-                    # Retry the request once with new token
-                    request_params["authToken"] = self.token
+                    # Retry once with refreshed Authorization header
+                    headers["Authorization"] = f"MQS-API {self.token}"
                     if method == "GET":
-                        retry_resp = requests.get(url, params=request_params, headers=headers,
+                        retry_resp = requests.get(url, params=params, headers=headers,
                                                   verify=self.verify_ssl, timeout=self.timeout)
                     else:
-                        retry_resp = requests.post(url, json=data, params=request_params, headers=headers,
+                        retry_resp = requests.post(url, json=data, params=params, headers=headers,
                                                    verify=self.verify_ssl, timeout=self.timeout)
                     retry_resp.raise_for_status()
                     return retry_resp.json()
@@ -593,37 +575,6 @@ class MemoQServerClient:
         try:
             result = self._make_request("POST", endpoint, data=payload)
 
-            # Store raw response diagnostics for TransactionLogger in app.py
-            import json
-            diag_lines = []
-            diag_lines.append(f"response type: {type(result).__name__}")
-            if isinstance(result, list):
-                diag_lines.append(f"list length: {len(result)}")
-                if result:
-                    first = result[0]
-                    diag_lines.append(f"first item type: {type(first).__name__}")
-                    if isinstance(first, dict):
-                        diag_lines.append(f"first item keys: {list(first.keys())}")
-                        tb_hits = first.get("TBHits", "MISSING")
-                        if isinstance(tb_hits, list):
-                            diag_lines.append(f"first TBHits count: {len(tb_hits)}")
-                            if tb_hits:
-                                diag_lines.append(f"first TBHit: {json.dumps(tb_hits[0], ensure_ascii=False)[:500]}")
-                        else:
-                            diag_lines.append(f"TBHits value: {str(tb_hits)[:200]}")
-                    else:
-                        diag_lines.append(f"first item: {str(first)[:300]}")
-                hits_count = sum(1 for item in result if isinstance(item, dict) and item.get("TBHits"))
-                diag_lines.append(f"items with TBHits: {hits_count}/{len(result)}")
-            elif isinstance(result, dict):
-                diag_lines.append(f"dict keys: {list(result.keys())}")
-                diag_lines.append(f"preview: {json.dumps(result, ensure_ascii=False)[:500]}")
-            else:
-                diag_lines.append(f"raw: {str(result)[:500]}")
-
-            self._last_tb_diagnostic = diag_lines
-            self._last_tb_raw_preview = json.dumps(result, ensure_ascii=False)[:1000] if result else "None/empty"
-
             # Use 'is not None' instead of truthiness check — empty list [] is valid but falsy
             if result is not None:
                 normalized_terms = normalize_memoq_tb_response(
@@ -635,7 +586,6 @@ class MemoQServerClient:
             else:
                 return []
         except Exception as e:
-            self._last_tb_diagnostic = [f"EXCEPTION: {e}"]
-            self._last_tb_raw_preview = f"EXCEPTION: {e}"
             logger.error(f"TB lookup FAILED: {e}", exc_info=True)
             return []
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             

@@ -79,17 +79,23 @@ Do not add or remove any spaces, line breaks, paragraphs, or formatting elements
 Use the examples provided below as reference for style and structure:
 %EXAMPLES%
 TERMINOLOGY RULES (MANDATORY — HIGHEST PRIORITY):
-The terms listed below come from the client's approved termbase. You MUST use these EXACT CHARACTER SEQUENCES as the base form in your translation. Do not rephrase, restructure, shorten, or use alternative compound forms of any approved term.
-You may ONLY add grammatical suffixes required by the target language (plural, case endings, possessive markers, etc.) to the END of the approved term. The base form of the term itself must remain exactly as specified in the termbase.
+Every term listed below comes from the client's approved termbase. You MUST use ALL of them in your translation — there are no optional terms. Every approved term that appears in a source segment MUST appear in the corresponding translation. Omitting any approved term is not permitted.
+The approved term is the required BASE FORM. You must preserve this base form exactly — do not rephrase, restructure, shorten, or substitute it with alternative forms.
+You are permitted to make ONLY the following grammatical adaptations, and nothing else:
+- Add inflectional suffixes to the END of the term (plural markers, case endings, possessive markers, verb conjugation endings, agglutinative suffixes, etc.) as required by %TARGETLANG% grammar.
+- Prepend grammatical articles (definite or indefinite) BEFORE the term where %TARGETLANG% grammar requires them (e.g., "der/die/das" in German, "le/la/les" in French, "el/la/los/las" in Spanish, "il/la/i/le" in Italian, etc.).
+- Apply gender agreement to articles and any adjectives that directly modify the term, following the grammatical gender of the term in %TARGETLANG%.
+- Apply case-driven changes to articles or preceding prepositions required by the syntactic role of the term in the sentence (e.g., German preposition-article contractions such as "im", "zum", "vom").
+The base form of the approved term itself must remain exactly as specified. Only the surrounding grammatical elements and word endings may change.
 %TERMS%
-Avoid using the following terms in your translation (if any):
+Keep the following terms in their original source language form — do not translate them:
 %FORBIDDENTERMS%
 PER-SEGMENT CONTEXT:
-Some segments below include ">>> TERMS:" lines showing the specific approved terms for that segment. These are the SAME mandatory terms from the list above, shown again next to the segment for your convenience. Use them exactly as specified.
+Some segments below include ">>> TERMS:" lines listing the approved termbase terms that appear in that segment. Every one of these terms MUST be used in your translation of that segment — all of them, without exception, with only the grammatical adaptations described above.
 Some segments also include ">>> TM MATCH" lines showing a previous translation from Translation Memory:
 - Use the TM match as your STARTING POINT — adapt it, do not translate from scratch.
 - For 90%+ matches, make only minimal changes. For 70-89%, adapt more freely but preserve reusable parts.
-- Always apply the mandatory terminology rules, even when adapting a TM match.
+- Always apply all mandatory terminology rules, even when adapting a TM match.
 Return only the translated text. Do not include explanations or comments in your response.
 OUTPUT FORMAT:
 [ID] Translated text
@@ -130,11 +136,12 @@ SEGMENTS TO TRANSLATE:
                     }
                 
                 # Format 3: Dict with alternative field names
+                # 'score' is the key used by local TMX extract_matches()
                 elif 'source' in match or 'target' in match:
                     return {
                         'source': match.get('source', match.get('source_text', '')),
                         'target': match.get('target', match.get('target_text', '')),
-                        'similarity': match.get('similarity', match.get('match_rate', 0)),
+                        'similarity': match.get('similarity', match.get('score', match.get('match_rate', 0))),
                         'match_type': match.get('match_type', 'FUZZY')
                     }
             
@@ -283,7 +290,7 @@ SEGMENTS TO TRANSLATE:
         if not sorted_dnt:
             return ""
         
-        text = "Keep these terms in original form (do not translate):\n"
+        text = "Keep the following terms in their original source language form — do not translate them:\n"
         for term in sorted_dnt:
             text += f"- {term}\n"
         
@@ -466,31 +473,3 @@ SEGMENTS TO TRANSLATE:
         # Replace context sections
         # Combine reference + history + examples
         combined_examples = reference_text + history_text + examples_text
-        
-        prompt = prompt.replace("%EXAMPLES%", combined_examples)
-        prompt = prompt.replace("%TERMS%", terms_text)
-        
-        # Handle DNT section — only replace the placeholder, not literal text
-        prompt = prompt.replace("%FORBIDDENTERMS%", dnt_text if dnt_text else "")
-        
-        # Replace segments
-        prompt = prompt.replace("%SEGMENTS%", seg_text)
-        
-        # ===== 8. Log Prompt Statistics =====
-        prompt_stats = {
-            'total_chars': len(prompt),
-            'segments': len(segments),
-            'tm_matches': sum(len(m) for m in tm_context.values() if m) if tm_context else 0,
-            'tb_terms': sum(len(t) for t in tb_context.values() if t) if tb_context else 0,
-            'dnt_terms': len(dnt_terms) if dnt_terms else 0,
-            'history_items': len(chat_history) if chat_history else 0
-        }
-        
-        logger.info(
-            f"Prompt built: {prompt_stats['total_chars']} chars, "
-            f"TM={prompt_stats['tm_matches']}, "
-            f"TB={prompt_stats['tb_terms']}, "
-            f"DNT={prompt_stats['dnt_terms']}"
-        )
-        
-        return prompt
