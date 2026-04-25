@@ -1170,7 +1170,14 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                     break  # Stop processing further batches
 
                 except Exception as e:
-                    err_msg = f"Batch {batch_num} failed: {str(e)}"
+                    # Unwrap tenacity RetryError to get the real cause
+                    cause = getattr(e, '__cause__', None) or getattr(e, 'last_attempt', None)
+                    if cause is not None:
+                        real_exc = getattr(cause, 'exception', lambda: None)()
+                        real_msg = str(real_exc) if real_exc else str(cause)
+                    else:
+                        real_msg = str(e)
+                    err_msg = f"Batch {batch_num} failed: {real_msg}"
                     st.error(f"❌ {err_msg}")
                     logger.log(f"ERROR: {err_msg}")
                     for seg in batch:
