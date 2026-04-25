@@ -330,47 +330,49 @@ class MemoQUI:
         with st.spinner("🔍 Searching Translation Memories..."):
             for tm_guid in tm_guids:
                 try:
+                    # lookup_segments returns {seg_idx: [TMMatch]} — use src_lang/tgt_lang kwargs
                     results = client.lookup_segments(
                         tm_guid,
                         [source_text],
-                        source_lang=source_lang,
-                        target_lang=target_lang,
+                        src_lang=source_lang,
+                        tgt_lang=target_lang,
                     )
-                    hits = results.get("Result", [{}])[0].get("TMHits", [])
-                    
-                    for hit in hits:
-                        match_rate = hit.get("MatchRate", 0)
+                    # Segment 0 matches, already sorted by similarity desc
+                    seg_matches = results.get(0, [])
+
+                    for match in seg_matches:
+                        match_rate = match.similarity if hasattr(match, 'similarity') else 0
                         if match_rate >= min_match_rate and match_rate > best_rate:
-                            best_match = hit
+                            best_match = match
                             best_rate = match_rate
-                
+
                 except Exception as e:
                     logger.warning(f"TM lookup error for {tm_guid}: {e}")
-        
+
         if best_match:
-            with st.expander(f"✓ TM Match ({best_match['MatchRate']}%)", expanded=True):
+            with st.expander(f"✓ TM Match ({best_match.similarity}%)", expanded=True):
                 col1, col2 = st.columns(2)
-                
+
                 with col1:
                     st.markdown("**Source (from TM):**")
-                    source_seg = best_match["TransUnit"]["SourceSegment"]
-                    st.code(source_seg.replace("<seg>", "").replace("</seg>", ""))
-                
+                    st.code(best_match.source_text)
+
                 with col2:
                     st.markdown("**Target (from TM):**")
-                    target_seg = best_match["TransUnit"]["TargetSegment"]
-                    st.code(target_seg.replace("<seg>", "").replace("</seg>", ""))
-                
+                    st.code(best_match.target_text)
+
                 # Show metadata
                 st.divider()
-                meta = best_match["TransUnit"]
+                meta = best_match.metadata or {}
                 col1, col2, col3 = st.columns(3)
-                
+
                 with col1:
-                    st.caption(f"📂 Domain: {meta.get('Domain', 'N/A')}")
+                    st.caption(f"📂 Domain: {meta.get('domain', 'N/A')}")
                 with col2:
-                    st.caption(f"👤 Creator: {meta.get('Creator', 'N/A')}")
+                    st.caption(f"👤 Creator: {meta.get('creator', 'N/A')}")
                 with col3:
-                    st.caption(f"📅 Created: {meta.get('Created', 'N/A')[:10]}")
+                    modified = meta.get('modified', 'N/A')
+                    st.caption(f"📅 Modified: {modified[:10] if len(modified) >= 10 else modified}")
         
         return best_match
+                                                  
