@@ -1,6 +1,6 @@
 """
 QA Engine - Post-translation quality assurance checks.
-6 checks: terminology, numbers, tags, empty, punctuation, consistency.
+5 checks: terminology, tags, empty, punctuation, consistency.
 All checks are enabled by default.
 """
 
@@ -17,7 +17,7 @@ class QAIssue:
     """A single QA issue found in a segment."""
     segment_index: int
     segment_id: str
-    check_type: str      # "terminology" | "numbers" | "tags" | "empty" | "punctuation" | "consistency"
+    check_type: str      # "terminology" | "tags" | "empty" | "punctuation" | "consistency"
     severity: str        # "error" | "warning"
     message: str
     source_text: str
@@ -28,12 +28,11 @@ class QAIssue:
 class QAEngine:
     """
     Post-translation QA engine.
-    All 6 checks are enabled by default.
+    All 5 checks are enabled by default.
     Pass enabled_checks=[] to disable all, or a subset to enable specific ones.
     """
 
     CHECK_TERMINOLOGY  = "terminology"
-    CHECK_NUMBERS      = "numbers"
     CHECK_TAGS         = "tags"
     CHECK_EMPTY        = "empty"
     CHECK_PUNCTUATION  = "punctuation"
@@ -41,7 +40,6 @@ class QAEngine:
 
     ALL_CHECKS = [
         CHECK_TERMINOLOGY,
-        CHECK_NUMBERS,
         CHECK_TAGS,
         CHECK_EMPTY,
         CHECK_PUNCTUATION,
@@ -49,7 +47,6 @@ class QAEngine:
     ]
 
     # Compiled patterns
-    _NUMBER_RE    = re.compile(r"\b\d[\d.,]*\b")
     _TAG_RE       = re.compile(r"\{\{\d+\}\}")
     _TERMINAL_RE  = re.compile(r"[.!?:;,]$")
 
@@ -59,22 +56,6 @@ class QAEngine:
     # ─────────────────────────────────────────────────────────────────────────
     # Helpers
     # ─────────────────────────────────────────────────────────────────────────
-
-    def _expand_source(self, seg) -> str:
-        """
-        Replace {{n}} placeholders in source with the text content of the
-        original XML elements they represent (e.g. <ph> tag content).
-        Allows number check to see numbers hidden inside inline tags.
-        """
-        text = seg.source or ""
-        tag_map = getattr(seg, "tag_map", None) or {}
-        for placeholder, element in tag_map.items():
-            try:
-                elem_text = "".join(element.itertext())
-            except Exception:
-                elem_text = ""
-            text = text.replace(placeholder, elem_text)
-        return text
 
     def _strip_placeholders(self, text: str) -> str:
         """Remove {{n}} placeholders before analysis (so their digits don't pollute checks)."""
@@ -115,8 +96,6 @@ class QAEngine:
             if check == self.CHECK_TERMINOLOGY:
                 if tb_terms is not None:
                     issues.extend(self._check_terminology(segments, tb_terms))
-            elif check == self.CHECK_NUMBERS:
-                issues.extend(self._check_numbers(segments))
             elif check == self.CHECK_TAGS:
                 issues.extend(self._check_tags(segments))
             elif check == self.CHECK_EMPTY:
@@ -184,50 +163,9 @@ class QAEngine:
 
         return issues
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # Check 2 — Numbers
-    # ─────────────────────────────────────────────────────────────────────────
-
-    def _check_numbers(self, segments) -> List[QAIssue]:
-        """
-        Every number token in source must appear in target.
-        Source is expanded: {{n}} placeholders are replaced with the actual
-        text content of the XML elements they represent (e.g. <ph> tag values),
-        so numbers hidden inside inline tags are visible.
-        Placeholder digits (the n in {{n}}) are stripped before comparison.
-        """
-        issues: List[QAIssue] = []
-
-        for idx, seg in enumerate(segments):
-            if not seg.source or not seg.target:
-                continue
-
-            # Expand source: get numbers from actual text + tag content
-            src_expanded = self._expand_source(seg)
-            src_clean    = self._strip_placeholders(src_expanded)
-            src_nums     = set(self._NUMBER_RE.findall(src_clean))
-
-            # Strip placeholders from target too (preserved {{n}} are tags, not numbers)
-            tgt_clean = self._strip_placeholders(seg.target)
-            tgt_nums  = set(self._NUMBER_RE.findall(tgt_clean))
-
-            missing = src_nums - tgt_nums
-
-            for num in sorted(missing):
-                issues.append(QAIssue(
-                    segment_index=idx,
-                    segment_id=seg.id,
-                    check_type=self.CHECK_NUMBERS,
-                    severity="error",
-                    message=f"Number missing in target: \u2018{num}\u2019",
-                    source_text=seg.source,
-                    target_text=seg.target,
-                ))
-
-        return issues
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Check 3 — Tags
+    # Check 2 — Tags
     # ─────────────────────────────────────────────────────────────────────────
 
     def _check_tags(self, segments) -> List[QAIssue]:
@@ -261,7 +199,7 @@ class QAEngine:
         return issues
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Check 4 — Empty segments
+    # Check 3 — Empty segments
     # ─────────────────────────────────────────────────────────────────────────
 
     def _check_empty(self, segments) -> List[QAIssue]:
@@ -284,7 +222,7 @@ class QAEngine:
         return issues
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Check 5 — Punctuation
+    # Check 4 — Punctuation
     # ─────────────────────────────────────────────────────────────────────────
 
     def _check_punctuation(self, segments) -> List[QAIssue]:
@@ -331,7 +269,7 @@ class QAEngine:
         return issues
 
     # ─────────────────────────────────────────────────────────────────────────
-    # Check 6 — Consistency
+    # Check 5 — Consistency
     # ─────────────────────────────────────────────────────────────────────────
 
     def _check_consistency(self, segments) -> List[QAIssue]:
