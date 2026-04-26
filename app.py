@@ -1212,6 +1212,55 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         """)
 
 
+def _compute_analysis():
+    """Compute TM match analysis from session state. Returns dict or None."""
+    segment_match_scores = st.session_state.get('segment_match_scores', {})
+    segment_objects = st.session_state.get('segment_objects', {})
+    if not segment_match_scores or not segment_objects:
+        return None
+    analysis_by_level = {
+        '101% (Context)': {'segments': 0, 'words': 0},
+        '100%':           {'segments': 0, 'words': 0},
+        '95%-99%':        {'segments': 0, 'words': 0},
+        '85%-94%':        {'segments': 0, 'words': 0},
+        '75%-84%':        {'segments': 0, 'words': 0},
+        '50%-74%':        {'segments': 0, 'words': 0},
+        'No match':       {'segments': 0, 'words': 0},
+    }
+    total_words = 0
+    for seg_id, seg_obj in segment_objects.items():
+        clean_text = re.sub(r'<[^>]+>|\{\{\d+\}\}', '', seg_obj.source).strip()
+        wc = len(clean_text.split()) if clean_text else 0
+        total_words += wc
+        score = segment_match_scores.get(seg_id, 0)
+        if score > 100:
+            analysis_by_level['101% (Context)']['segments'] += 1
+            analysis_by_level['101% (Context)']['words'] += wc
+        elif score == 100:
+            analysis_by_level['100%']['segments'] += 1
+            analysis_by_level['100%']['words'] += wc
+        elif score >= 95:
+            analysis_by_level['95%-99%']['segments'] += 1
+            analysis_by_level['95%-99%']['words'] += wc
+        elif score >= 85:
+            analysis_by_level['85%-94%']['segments'] += 1
+            analysis_by_level['85%-94%']['words'] += wc
+        elif score >= 75:
+            analysis_by_level['75%-84%']['segments'] += 1
+            analysis_by_level['75%-84%']['words'] += wc
+        elif score >= 50:
+            analysis_by_level['50%-74%']['segments'] += 1
+            analysis_by_level['50%-74%']['words'] += wc
+        else:
+            analysis_by_level['No match']['segments'] += 1
+            analysis_by_level['No match']['words'] += wc
+    return {
+        'total_segments': len(segment_objects),
+        'total_words': total_words,
+        'by_level': analysis_by_level,
+    }
+
+
 # --- UI Layout ---
 
 st.title("🚀 Enhanced Translation Assistant")
@@ -1406,6 +1455,13 @@ with tab1:
             else:
                 st.error("XLIFF file is required.")
 
+    # --- Analysis results shown inline after translation completes ---
+    if st.session_state.translation_results:
+        _analysis = _compute_analysis()
+        if _analysis:
+            st.divider()
+            show_analysis_screen(_analysis)
+
 # === TAB 2: RESULTS ===
 with tab2:
     if st.session_state.translation_results:
@@ -1472,56 +1528,12 @@ with tab2:
         df = pd.DataFrame(preview_data)
         st.dataframe(df, width="stretch")
 
-        # --- TM Analysis (computed from translation match scores) ---
-        segment_match_scores = st.session_state.get('segment_match_scores', {})
-        segment_objects = st.session_state.get('segment_objects', {})
-        if segment_match_scores and segment_objects:
+        # --- TM Analysis ---
+        _tab2_analysis = _compute_analysis()
+        if _tab2_analysis:
             st.divider()
             st.subheader("📊 TM Match Analysis")
-
-            analysis_by_level = {
-                '101% (Context)': {'segments': 0, 'words': 0},
-                '100%': {'segments': 0, 'words': 0},
-                '95%-99%': {'segments': 0, 'words': 0},
-                '85%-94%': {'segments': 0, 'words': 0},
-                '75%-84%': {'segments': 0, 'words': 0},
-                '50%-74%': {'segments': 0, 'words': 0},
-                'No match': {'segments': 0, 'words': 0}
-            }
-            total_words_analysis = 0
-            for seg_id, seg_obj in segment_objects.items():
-                clean_text = re.sub(r'<[^>]+>|\{\{\d+\}\}', '', seg_obj.source).strip()
-                wc = len(clean_text.split()) if clean_text else 0
-                total_words_analysis += wc
-                score = segment_match_scores.get(seg_id, 0)
-                if score > 100:
-                    analysis_by_level['101% (Context)']['segments'] += 1
-                    analysis_by_level['101% (Context)']['words'] += wc
-                elif score == 100:
-                    analysis_by_level['100%']['segments'] += 1
-                    analysis_by_level['100%']['words'] += wc
-                elif score >= 95:
-                    analysis_by_level['95%-99%']['segments'] += 1
-                    analysis_by_level['95%-99%']['words'] += wc
-                elif score >= 85:
-                    analysis_by_level['85%-94%']['segments'] += 1
-                    analysis_by_level['85%-94%']['words'] += wc
-                elif score >= 75:
-                    analysis_by_level['75%-84%']['segments'] += 1
-                    analysis_by_level['75%-84%']['words'] += wc
-                elif score >= 50:
-                    analysis_by_level['50%-74%']['segments'] += 1
-                    analysis_by_level['50%-74%']['words'] += wc
-                else:
-                    analysis_by_level['No match']['segments'] += 1
-                    analysis_by_level['No match']['words'] += wc
-
-            post_analysis_results = {
-                'total_segments': len(segment_objects),
-                'total_words': total_words_analysis,
-                'by_level': analysis_by_level
-            }
-            show_analysis_screen(post_analysis_results)
+            show_analysis_screen(_tab2_analysis)
 
     else:
         st.info("No results yet. Run translation in Workspace tab.")
