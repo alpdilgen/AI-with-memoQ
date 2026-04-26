@@ -168,10 +168,7 @@ class QAEngine:
 
     def _check_untranslated(self, segments) -> List[QAIssue]:
         """
-        Two sub-cases:
-        (a) Source has content but target is blank/whitespace  → error
-        (b) Target text is identical to source text (not translated) → warning
-        Comparison for (b) is case-insensitive and strips placeholders.
+        Flags segments where the source has content but the target is blank.
         """
         issues: List[QAIssue] = []
 
@@ -182,7 +179,6 @@ class QAEngine:
             if not src.strip():
                 continue  # empty source segment — skip
 
-            # (a) Empty target
             if not tgt.strip():
                 issues.append(QAIssue(
                     segment_index=idx,
@@ -193,27 +189,6 @@ class QAEngine:
                     source_text=src,
                     target_text=tgt,
                 ))
-                continue  # no need to check (b) if already empty
-
-            # (b) Source == Target (identical content, likely untouched)
-            src_norm = self._strip_placeholders(src).strip().lower()
-            tgt_norm = self._strip_placeholders(tgt).strip().lower()
-            if src_norm and tgt_norm and src_norm == tgt_norm:
-                # Skip segments with no translatable text: numbers, codes, symbols.
-                # If the source has no alphabetic characters it is expected to be
-                # unchanged in the target (e.g. "100", "2.5%", "ABC-123").
-                if not re.search(r"[a-zA-Z\u00C0-\u024F\u0400-\u04FF]", src_norm):
-                    pass  # non-translatable content — identical target is correct
-                else:
-                    issues.append(QAIssue(
-                        segment_index=idx,
-                        segment_id=seg.id,
-                        check_type=self.CHECK_UNTRANSLATED,
-                        severity="warning",
-                        message="Target is identical to source (possibly not translated)",
-                        source_text=src,
-                        target_text=tgt,
-                    ))
 
         return issues
 
@@ -338,4 +313,17 @@ class QAEngine:
                 continue
 
             variants = " / ".join(f"\u2018{t[:35]}\u2019" for t in sorted(unique_targets))
-            for idx, seg_id,
+            for idx, seg_id, target in occurrences:
+                seg = segments[idx]
+                issues.append(QAIssue(
+                    segment_index=idx,
+                    segment_id=seg_id,
+                    check_type=self.CHECK_CONSISTENCY,
+                    severity="warning",
+                    message=f"Inconsistent translation: {variants}",
+                    source_text=seg.source,
+                    target_text=target,
+                ))
+
+        return issues
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
