@@ -744,8 +744,6 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                     tb_languages = []
                     if isinstance(tb_info, dict):
                         tb_languages = tb_info.get('Languages', [])
-                    logger.log(f"  [DIAG] TB languages from API: {tb_languages}")
-
                     if tb_languages and isinstance(tb_languages, list):
                         # Build all equivalent base codes for matching
                         # e.g., src_code="en-us" → src_bases={"en", "eng"}
@@ -774,7 +772,7 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                                 tb_tgt_lang = tb_lang
                     logger.log(f"  TB lang mapping: src={src_code} → {tb_src_lang}, tgt={tgt_code} → {tb_tgt_lang}")
                 except Exception as e:
-                    logger.log(f"  [DIAG] TB metadata fetch error: {type(e).__name__}: {str(e)[:200]}")
+                    logger.log(f"  TB lang detection error: {type(e).__name__}: {str(e)[:200]}")
 
                 # --- Step 1: Extract unique n-grams from all segments ---
                 all_ngrams = set()
@@ -812,7 +810,6 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                 # --- Step 2: Use lookupterms with TB's actual language codes ---
                 found_terms = []
                 seen_pairs = set()
-                diag_logged = 0
 
                 ngram_batch_size = 50
                 for batch_start in range(0, len(search_ngrams), ngram_batch_size):
@@ -823,17 +820,11 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                         "TargetLanguage": tb_tgt_lang,
                         "Segments": seg_list
                     }
-                    if diag_logged < 1:
-                        logger.log(f"  [DIAG] lookupterms payload: SrcLang={tb_src_lang}, TgtLang={tb_tgt_lang}, first 3 segs={seg_list[:3]}")
                     try:
                         result = memoq_client._make_request(
                             "POST", f"/tbs/{tb_guid}/lookupterms",
                             data=payload
                         )
-                        if diag_logged < 1:
-                            raw_str = _json.dumps(result, ensure_ascii=False)[:2000] if result else "None"
-                            logger.log(f"  [DIAG] lookupterms response ({type(result).__name__}): {raw_str}")
-                            diag_logged += 1
 
                         result_list = []
                         if isinstance(result, dict):
@@ -853,11 +844,6 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                                 for hit in hit_group:
                                     if not isinstance(hit, dict):
                                         continue
-                                    if diag_logged < 5:
-                                        hit_str = _json.dumps(hit, ensure_ascii=False)[:1000]
-                                        logger.log(f"  [DIAG] TBHit: {hit_str}")
-                                        diag_logged += 1
-
                                     # Extract terms from Entry.Languages[].TermItems[].Text
                                     entry = hit.get('Entry', hit)
                                     languages = entry.get('Languages', [])
@@ -906,7 +892,7 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                                                     target_language=tgt_code
                                                 ))
                     except Exception as e:
-                        logger.log(f"  [DIAG] TB batch error: {type(e).__name__}: {str(e)[:200]}")
+                        logger.log(f"  TB batch error: {type(e).__name__}: {str(e)[:200]}")
                         continue
 
                 logger.log(f"  TB search found {len(found_terms)} unique term pairs")
