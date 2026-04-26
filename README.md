@@ -1,39 +1,39 @@
 # memoQ AI Translator
 
-AI destekli çeviri aracı. memoQ Server'a bağlanarak TM ve TB verilerini kullanır, OpenAI modelleriyle çeviri üretir ve sonucu memoQ'ya uyumlu XLIFF olarak teslim eder.
+AI-powered translation tool for memoQ workflows. Connects to memoQ Server to leverage TM and TB data, generates translations via OpenAI, and delivers memoQ-compatible XLIFF output.
 
-> **Beta:** Şu an iç test aşamasındadır.
-
----
-
-## Ne yapar?
-
-1. **XLIFF yükle** — memoQ'dan export edilen `.mqxliff` dosyasını yükle
-2. **memoQ Server'a bağlan** — TM ve TB seç
-3. **Çeviriyi başlat** — GPT-4o veya GPT-4o-mini ile segment bazlı çeviri
-4. **İndir** — memoQ metadata'sıyla (match score, status) dolu XLIFF'i al, memoQ'ya import et
+> **Beta:** Currently in internal testing.
 
 ---
 
-## Gereksinimler
+## What it does
+
+1. **Upload XLIFF** — load a `.mqxliff` file exported from memoQ
+2. **Connect to memoQ Server** — select Translation Memories and Termbases
+3. **Translate** — segment-by-segment translation using GPT-4o or GPT-4o-mini
+4. **Download** — receive a XLIFF with full memoQ metadata (match score, status) ready to import
+
+---
+
+## Requirements
 
 - OpenAI API key
-- memoQ Server erişimi (URL, kullanıcı adı, şifre)
-- memoQ'dan export edilmiş `.mqxliff` dosyası
+- memoQ Server access (URL, username, password)
+- A `.mqxliff` file exported from memoQ
 
 ---
 
-## Ayarlar
+## Settings
 
-| Parametre | Açıklama |
-|-----------|----------|
-| Model | `gpt-4o` (kaliteli) veya `gpt-4o-mini` (hızlı/ucuz) |
-| Kabul eşiği | Bu oran ve üzerindeki TM eşleşmeleri çevrilmez, doğrudan alınır (varsayılan: %95) |
-| TM eşleşme eşiği | TM bağlamı için minimum benzerlik oranı (varsayılan: %70) |
+| Parameter | Description |
+|-----------|-------------|
+| Model | `gpt-4o` (quality) or `gpt-4o-mini` (fast / lower cost) |
+| Acceptance threshold | Segments at or above this TM match rate are passed through untranslated (default: 95%) |
+| TM match threshold | Minimum similarity for TM context inclusion (default: 70%) |
 
 ---
 
-## memoQ'ya import
+## Importing back to memoQ
 
-İndirilen XLIFF'i memoQ'da **Import > Import with options** ile aç.  
-Segmentler `mq:status` ve `mq:percent` değerleriyle gelir — TM eşleşmeleri `ManuallyConfirmed`, AI çevirileri `PartiallyEdited` olarak işaretlenir.
+Open the downloaded XLIFF in memoQ via **Import > Import with options**.  
+Segments arrive with `mq:status` and `mq:percent` values — TM matches are marked `ManuallyConfirmed`, AI translations are marked `PartiallyEdited`.
