@@ -179,49 +179,6 @@ class EmbeddingMatcher:
         
         return len(chunks), False
     
-    def find_similar(self, 
-                     source_text: str, 
-                     top_k: int = 5,
-                     min_similarity: float = 0.3) -> List[ReferenceMatch]:
-        """
-        Find most similar reference chunks for a source text.
-        
-        Args:
-            source_text: Source text to match
-            top_k: Number of top matches to return
-            min_similarity: Minimum similarity threshold
-            
-        Returns:
-            List of ReferenceMatch objects
-        """
-        if self.reference_embeddings is None or len(self.reference_chunks) == 0:
-            return []
-        
-        # Get embedding for source text
-        source_embedding = self._get_embeddings_batch([source_text])
-        if len(source_embedding) == 0:
-            return []
-        
-        source_vec = source_embedding[0]
-        
-        # Compute cosine similarities
-        similarities = self._cosine_similarity(source_vec, self.reference_embeddings)
-        
-        # Get top-k indices
-        top_indices = np.argsort(similarities)[::-1][:top_k]
-        
-        matches = []
-        for idx in top_indices:
-            sim = similarities[idx]
-            if sim >= min_similarity:
-                matches.append(ReferenceMatch(
-                    text=self.reference_chunks[idx],
-                    similarity=float(sim),
-                    index=int(idx)
-                ))
-        
-        return matches
-    
     def find_similar_batch(self,
                            source_texts: List[str],
                            top_k: int = 3,
@@ -354,3 +311,4 @@ def get_embedding_cost_estimate(chunk_count: int, segment_count: int) -> dict:
         'total_cost': round(total_cost, 6),
         'total_cost_formatted': f"${total_cost:.4f}"
     }
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
