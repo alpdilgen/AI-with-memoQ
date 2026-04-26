@@ -168,7 +168,8 @@ class QAEngine:
 
     def _check_untranslated(self, segments) -> List[QAIssue]:
         """
-        Flags segments where the source has content but the target is blank.
+        (a) Source has content but target is blank/whitespace → error
+        (b) Target text is identical to source text → warning
         """
         issues: List[QAIssue] = []
 
@@ -179,6 +180,7 @@ class QAEngine:
             if not src.strip():
                 continue  # empty source segment — skip
 
+            # (a) Empty target
             if not tgt.strip():
                 issues.append(QAIssue(
                     segment_index=idx,
@@ -186,6 +188,21 @@ class QAEngine:
                     check_type=self.CHECK_UNTRANSLATED,
                     severity="error",
                     message="Segment not translated (empty target)",
+                    source_text=src,
+                    target_text=tgt,
+                ))
+                continue
+
+            # (b) Source == Target (identical, likely untouched)
+            src_norm = self._strip_placeholders(src).strip().lower()
+            tgt_norm = self._strip_placeholders(tgt).strip().lower()
+            if src_norm and tgt_norm and src_norm == tgt_norm:
+                issues.append(QAIssue(
+                    segment_index=idx,
+                    segment_id=seg.id,
+                    check_type=self.CHECK_UNTRANSLATED,
+                    severity="warning",
+                    message="Target is identical to source (possibly not translated)",
                     source_text=src,
                     target_text=tgt,
                 ))
@@ -326,4 +343,4 @@ class QAEngine:
                 ))
 
         return issues
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
+                                                                                                                                                                  
