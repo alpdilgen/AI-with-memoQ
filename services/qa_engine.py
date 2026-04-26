@@ -6,7 +6,7 @@ All checks are enabled by default.
 
 import re
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Dict, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -48,8 +48,43 @@ class QAEngine:
         CHECK_CONSISTENCY,
     ]
 
+    # Compiled patterns
+    _NUMBER_RE    = re.compile(r"\b\d[\d.,]*\b")
+    _TAG_RE       = re.compile(r"\{\{\d+\}\}")
+    _TERMINAL_RE  = re.compile(r"[.!?:;,]$")
+
     def __init__(self, enabled_checks: Optional[List[str]] = None):
         self.enabled_checks = set(enabled_checks if enabled_checks is not None else self.ALL_CHECKS)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Helpers
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _expand_source(self, seg) -> str:
+        """
+        Replace {{n}} placeholders in source with the text content of the
+        original XML elements they represent (e.g. <ph> tag content).
+        Allows number check to see numbers hidden inside inline tags.
+        """
+        text = seg.source or ""
+        tag_map = getattr(seg, "tag_map", None) or {}
+        for placeholder, element in tag_map.items():
+            try:
+                elem_text = "".join(element.itertext())
+            except Exception:
+                elem_text = ""
+            text = text.replace(placeholder, elem_text)
+        return text
+
+    def _strip_placeholders(self, text: str) -> str:
+        """Remove {{n}} placeholders before analysis (so their digits don't pollute checks)."""
+        return self._TAG_RE.sub(" ", text)
+
+    def _terminal_char(self, text: str) -> str:
+        """Return the last non-whitespace, non-placeholder character of text."""
+        # Remove placeholders first so trailing {{1}} doesn't hide punctuation
+        clean = self._strip_placeholders(text).rstrip()
+        return clean[-1:] if clean else ""
 
     # ─────────────────────────────────────────────────────────────────────────
     # Public API
@@ -106,7 +141,7 @@ class QAEngine:
         """
         For each segment with TB hits:
         - Required term: target must contain the TB target term (case-insensitive substring).
-        - Forbidden term: target must NOT contain the forbidden TB term.
+        - Forbidden term: target must NOT contain the forbidden TB target term.
         """
         issues: List[QAIssue] = []
 
@@ -153,17 +188,29 @@ class QAEngine:
     # Check 2 — Numbers
     # ─────────────────────────────────────────────────────────────────────────
 
-    _NUMBER_RE = re.compile(r"\b\d[\d.,]*\b")
-
     def _check_numbers(self, segments) -> List[QAIssue]:
-        """Every number token in source must appear verbatim in target."""
+        """
+        Every number token in source must appear in target.
+        Source is expanded: {{n}} placeholders are replaced with the actual
+        text content of the XML elements they represent (e.g. <ph> tag values),
+        so numbers hidden inside inline tags are visible.
+        Placeholder digits (the n in {{n}}) are stripped before comparison.
+        """
         issues: List[QAIssue] = []
 
         for idx, seg in enumerate(segments):
             if not seg.source or not seg.target:
                 continue
-            src_nums = set(self._NUMBER_RE.findall(seg.source))
-            tgt_nums = set(self._NUMBER_RE.findall(seg.target))
+
+            # Expand source: get numbers from actual text + tag content
+            src_expanded = self._expand_source(seg)
+            src_clean    = self._strip_placeholders(src_expanded)
+            src_nums     = set(self._NUMBER_RE.findall(src_clean))
+
+            # Strip placeholders from target too (preserved {{n}} are tags, not numbers)
+            tgt_clean = self._strip_placeholders(seg.target)
+            tgt_nums  = set(self._NUMBER_RE.findall(tgt_clean))
+
             missing = src_nums - tgt_nums
 
             for num in sorted(missing):
@@ -182,8 +229,6 @@ class QAEngine:
     # ─────────────────────────────────────────────────────────────────────────
     # Check 3 — Tags
     # ─────────────────────────────────────────────────────────────────────────
-
-    _TAG_RE = re.compile(r"\{\{\d+\}\}")
 
     def _check_tags(self, segments) -> List[QAIssue]:
         """{{n}} placeholder set in source must exactly match target."""
@@ -208,7 +253,7 @@ class QAEngine:
                     segment_id=seg.id,
                     check_type=self.CHECK_TAGS,
                     severity="error",
-                    message=f"Tag mismatch — {'; '.join(parts)}",
+                    message=f"Tag mismatch — {';' .join(parts)}",
                     source_text=seg.source,
                     target_text=seg.target,
                 ))
@@ -242,19 +287,23 @@ class QAEngine:
     # Check 5 — Punctuation
     # ─────────────────────────────────────────────────────────────────────────
 
-    _TERMINAL_RE = re.compile(r"[.!?:;,]$")
-
     def _check_punctuation(self, segments) -> List[QAIssue]:
-        """Terminal punctuation character must match between source and target."""
+        """
+        Terminal punctuation must match between source and target.
+        Placeholders ({{n}}) are stripped before checking so trailing tags
+        do not mask or fake punctuation.
+        """
         issues: List[QAIssue] = []
 
         for idx, seg in enumerate(segments):
             if not seg.source or not seg.target:
                 continue
-            src_end = seg.source.rstrip()[-1:] if seg.source.rstrip() else ""
-            tgt_end = seg.target.rstrip()[-1:] if seg.target.rstrip() else ""
-            src_has = bool(self._TERMINAL_RE.match(src_end))
-            tgt_has = bool(self._TERMINAL_RE.match(tgt_end))
+
+            src_end = self._terminal_char(seg.source)
+            tgt_end = self._terminal_char(seg.target)
+
+            src_has = bool(src_end and self._TERMINAL_RE.match(src_end))
+            tgt_has = bool(tgt_end and self._TERMINAL_RE.match(tgt_end))
 
             if src_has and not tgt_has:
                 issues.append(QAIssue(
@@ -287,8 +336,9 @@ class QAEngine:
 
     def _check_consistency(self, segments) -> List[QAIssue]:
         """
-        Same source text (case-insensitive, stripped) must always produce
-        the same translation. Flags all occurrences when multiple targets exist.
+        Same source text (case-insensitive, stripped, placeholders normalised)
+        must always produce the same translation.
+        Flags all occurrences when multiple targets exist.
         """
         issues: List[QAIssue] = []
         src_map: Dict[str, List[Tuple[int, str, str]]] = {}
@@ -296,7 +346,9 @@ class QAEngine:
         for idx, seg in enumerate(segments):
             if not seg.source or not seg.target:
                 continue
-            key = seg.source.strip().lower()
+            # Normalise: strip, lowercase, collapse placeholder numbers
+            # so {{1}} and {{2}} are treated the same (only structure matters)
+            key = self._TAG_RE.sub("{{?}}", seg.source.strip().lower())
             src_map.setdefault(key, []).append((idx, seg.id, seg.target.strip()))
 
         for key, occurrences in src_map.items():
