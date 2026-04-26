@@ -310,14 +310,6 @@ class XMLParser:
         return xml_str
 
     @staticmethod
-    def _add_tm_match_metadata_to_segment(xml_str: str, seg_id: str) -> str:
-        """
-        Legacy method - redirects to new method with 100% match.
-        Kept for backward compatibility.
-        """
-        return XMLParser._add_memoq_metadata_to_segment(xml_str, seg_id, 100)
-
-    @staticmethod
     def parse_tmx(content: bytes) -> List[Dict]:
         """Standard TMX parsing"""
         root = None
@@ -344,3 +336,4 @@ class XMLParser:
                     if lang: entry[lang.lower()] = text
                 entries.append(entry)
         return entries
+                                                                                                                                                                                                                                                                                                                
