@@ -4,8 +4,6 @@ import time
 import re
 from datetime import datetime
 from openai import AuthenticationError
-from services.tm_matcher import TMatcher
-from services.tb_matcher import TBMatcher
 from services.prompt_builder import PromptBuilder
 from services.ai_translator import AITranslator
 from services.caching import CacheManager
@@ -1713,3 +1711,4 @@ with tab3:
             - Formatting rules
             - Terminology categories
             """)
+                                                                                   
