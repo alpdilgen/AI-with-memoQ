@@ -6,9 +6,8 @@ Handles communication with memoQ Server for TM and TB operations
 import requests
 import logging
 import re
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from datetime import datetime, timedelta
-from enum import Enum
 
 logger = logging.getLogger(__name__)
 
@@ -85,111 +84,6 @@ def normalize_memoq_tm_response(memoq_response: Dict, match_threshold: int = 70)
         return {}
 
     return results_by_segment
-
-
-def normalize_memoq_tb_response(memoq_response, src_lang: str = "eng", tgt_lang: str = "tur") -> List:
-    """
-    Convert memoQ TB API response to standard TermMatch objects.
-
-    The memoQ TB lookupterms response structure:
-        {"Result": [{"TBHits": [[hit, ...], [hit, ...], ...]}, ...]}
-    TBHits is a 2D array (TBHit[][]) per the memoQ API spec: outer index is the term
-    position matched within the segment, inner index is the matching TB entry.
-    Each TBHit contains SourceTerm and TargetTerm directly, plus a full Entry.
-
-    Args:
-        memoq_response: Raw response from memoQ Server TB lookup
-        src_lang: Source language code (e.g., 'eng')
-        tgt_lang: Target language code (e.g., 'tur')
-
-    Returns:
-        List of TermMatch objects (forbidden terms excluded)
-    """
-    from models.entities import TermMatch
-
-    terms = []
-    seen = set()
-
-    try:
-        # Response is always {"Result": [...]} per API spec
-        if isinstance(memoq_response, dict):
-            result_list = memoq_response.get('Result', [])
-        elif isinstance(memoq_response, list):
-            result_list = memoq_response  # Fallback for non-standard response
-        else:
-            logger.warning(f"Unexpected TB response type: {type(memoq_response)}")
-            return []
-
-        logger.debug(f"TB normalize: {len(result_list)} segment results")
-
-        for segment_result in result_list:
-            if not isinstance(segment_result, dict):
-                continue
-
-            # TBHits is TBHit[][] — a 2D array per the memoQ API spec
-            tb_hits_2d = segment_result.get('TBHits', [])
-            if not isinstance(tb_hits_2d, list):
-                continue
-
-            for inner_hits in tb_hits_2d:
-                # Each outer element is an array of hits for one matched term position
-                if not isinstance(inner_hits, list):
-                    inner_hits = [inner_hits] if isinstance(inner_hits, dict) else []
-
-                for hit in inner_hits:
-                    if not isinstance(hit, dict):
-                        continue
-
-                    # SourceTerm and TargetTerm are provided directly in the hit
-                    source_term = hit.get('SourceTerm', '').strip()
-                    target_term = hit.get('TargetTerm', '').strip()
-
-                    if not source_term or not target_term:
-                        continue
-
-                    # Check IsForbidden on the specific target TermItem via Entry
-                    is_forbidden = False
-                    entry = hit.get('Entry', {})
-                    if isinstance(entry, dict):
-                        for lang_entry in entry.get('Languages', []):
-                            if not isinstance(lang_entry, dict):
-                                continue
-                            lang_code = lang_entry.get('Language', '').lower()
-                            if not lang_code.startswith(tgt_lang.lower()[:3]):
-                                continue
-                            for term_item in lang_entry.get('TermItems', []):
-                                if not isinstance(term_item, dict):
-                                    continue
-                                if term_item.get('Text', '').strip() == target_term:
-                                    is_forbidden = term_item.get('IsForbidden', False)
-                                    break
-                    if is_forbidden:
-                        logger.debug(f"TB: skipping forbidden term: {source_term} → {target_term}")
-                        continue
-
-                    pair_key = (source_term.lower(), target_term.lower())
-                    if pair_key in seen:
-                        continue
-                    seen.add(pair_key)
-
-                    try:
-                        term = TermMatch(
-                            source=source_term,
-                            target=target_term,
-                            source_language=src_lang,
-                            target_language=tgt_lang
-                        )
-                        terms.append(term)
-                        logger.debug(f"TB term: {source_term} → {target_term}")
-                    except Exception as e:
-                        logger.warning(f"Invalid TermMatch: {e}")
-
-    except Exception as e:
-        logger.error(f"Error normalizing memoQ TB response: {e}")
-        return []
-
-    logger.debug(f"TB normalize: returning {len(terms)} terms")
-    return terms
 
 
 class MemoQServerClient:
@@ -485,25 +379,6 @@ class MemoQServerClient:
             logger.error(f"TM lookup error: {e}", exc_info=True)
             return {}
     
-    def concordance_search(
-        self,
-        tm_guid: str,
-        search_terms: List[str],
-        results_limit: int = 64
-    ) -> Dict:
-        """Concordance search in Translation Memory"""
-        payload = {
-            "SearchExpression": search_terms,
-            "Options": {
-                "ResultsLimit": results_limit,
-                "Ascending": False,
-                "Column": 3
-            }
-        }
-        
-        endpoint = f"/tms/{tm_guid}/concordance"
-        return self._make_request("POST", endpoint, data=payload)
-    
     # ==================== TERMBASE ====================
     
     def list_tbs(
@@ -525,67 +400,8 @@ class MemoQServerClient:
         
         result = self._make_request("GET", endpoint, params=params)
         self._tb_cache[cache_key] = result
-        
+
         logger.info(f"Listed {len(result)} TBs")
         return result
-    
-    def lookup_terms(
-        self,
-        tb_guid: str,
-        search_terms: List[str],
-        src_lang: str = "eng",
-        tgt_lang: Optional[str] = "tur"
-    ) -> List:
-        """
-        Lookup terms in Termbase
-        
-        Args:
-            tb_guid: Termbase GUID
-            search_terms: List of terms to lookup
-            src_lang: Source language code (default: "eng" for English)
-            tgt_lang: Target language code (optional, default: "tur" for Turkish)
-        
-        Returns:
-            List of normalized TermMatch objects
-        """
-        # Clean search terms: remove XML inline tags AND {{N}} placeholders
-        cleaned_terms = []
-        for term in search_terms:
-            # Remove XML inline tags: <bpt>, <ept>, <ph>, <it>, etc.
-            clean_text = re.sub(r'<[^>]+>', '', term)
-            # Remove {{N}} style tag placeholders
-            clean_text = re.sub(r'\{\{[^}]+\}\}', '', clean_text)
-            # Clean up extra whitespace
-            clean_text = re.sub(r'\s+', ' ', clean_text).strip()
-            cleaned_terms.append(clean_text)
-        
-        # Build correct payload according to memoQ API v1 documentation
-        # IMPORTANT: Segments must be wrapped in <seg> XML tags
-        payload = {
-            "SourceLanguage": src_lang,
-            "Segments": [f"<seg>{term}</seg>" for term in cleaned_terms]
-        }
-        
-        # Add target language if specified
-        if tgt_lang:
-            payload["TargetLanguage"] = tgt_lang
-        
-        endpoint = f"/tbs/{tb_guid}/lookupterms"
-        
-        try:
-            result = self._make_request("POST", endpoint, data=payload)
 
-            # Use 'is not None' instead of truthiness check — empty list [] is valid but falsy
-            if result is not None:
-                normalized_terms = normalize_memoq_tb_response(
-                    result,
-                    src_lang=src_lang,
-                    tgt_lang=tgt_lang
-                )
-                return normalized_terms
-            else:
-                return []
-        except Exception as e:
-            logger.error(f"TB lookup FAILED: {e}", exc_info=True)
-            return []
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   
