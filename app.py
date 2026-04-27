@@ -15,6 +15,7 @@ import config
 from services.memoq_server_client import MemoQServerClient
 from services.memoq_ui import MemoQUI
 from analysis_screen import show_analysis_screen
+from verifika_screen import show_verifika_tab
 # --- Setup ---
 st.set_page_config(page_title=config.APP_NAME, layout="wide", page_icon="🌍")
 
@@ -77,6 +78,10 @@ if 'batch_size' not in st.session_state:
     st.session_state.batch_size = 20
 if 'segment_match_scores' not in st.session_state:
     st.session_state.segment_match_scores = {}
+if "last_xliff_bytes" not in st.session_state:
+    st.session_state.last_xliff_bytes = None
+if "last_xliff_filename" not in st.session_state:
+    st.session_state.last_xliff_filename = None
 
 # --- Sidebar ---
 with st.sidebar:
@@ -1266,7 +1271,7 @@ def _compute_analysis():
 st.title("🚀 Enhanced Translation Assistant")
 st.markdown("AI-powered translation with TM, Termbase & Smart Prompt Builder")
 
-tab1, tab2, tab3 = st.tabs(["📂 Workspace", "📊 Results", "✨ Prompt Builder"])
+tab1, tab2, tab3, tab4 = st.tabs(["📂 Workspace", "📊 Results", "✨ Prompt Builder", "✅ Verifika QA"])
 
 # === TAB 1: WORKSPACE ===
 with tab1:
@@ -1281,6 +1286,8 @@ with tab1:
         
         if xliff_file:
             xliff_file.seek(0)
+            st.session_state.last_xliff_bytes = xliff_file.getvalue()
+            st.session_state.last_xliff_filename = xliff_file.name
             detected_src, detected_tgt = XMLParser.detect_languages(xliff_file.getvalue())
             if detected_src and detected_tgt:
                 st.session_state.detected_languages = {
@@ -1710,3 +1717,7 @@ with tab3:
             - Formatting rules
             - Terminology categories
             """)
+
+# === TAB 4: VERIFIKA QA ===
+with tab4:
+    show_verifika_tab()
