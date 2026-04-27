@@ -4,8 +4,6 @@ import time
 import re
 from datetime import datetime
 from openai import AuthenticationError
-from services.tm_matcher import TMatcher
-from services.tb_matcher import TBMatcher
 from services.prompt_builder import PromptBuilder
 from services.ai_translator import AITranslator
 from services.caching import CacheManager
@@ -746,8 +744,6 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                     tb_languages = []
                     if isinstance(tb_info, dict):
                         tb_languages = tb_info.get('Languages', [])
-                    logger.log(f"  [DIAG] TB languages from API: {tb_languages}")
-
                     if tb_languages and isinstance(tb_languages, list):
                         # Build all equivalent base codes for matching
                         # e.g., src_code="en-us" → src_bases={"en", "eng"}
@@ -776,7 +772,7 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                                 tb_tgt_lang = tb_lang
                     logger.log(f"  TB lang mapping: src={src_code} → {tb_src_lang}, tgt={tgt_code} → {tb_tgt_lang}")
                 except Exception as e:
-                    logger.log(f"  [DIAG] TB metadata fetch error: {type(e).__name__}: {str(e)[:200]}")
+                    logger.log(f"  TB lang detection error: {type(e).__name__}: {str(e)[:200]}")
 
                 # --- Step 1: Extract unique n-grams from all segments ---
                 all_ngrams = set()
@@ -814,28 +810,21 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                 # --- Step 2: Use lookupterms with TB's actual language codes ---
                 found_terms = []
                 seen_pairs = set()
-                diag_logged = 0
 
-                batch_size = 50
-                for batch_start in range(0, len(search_ngrams), batch_size):
-                    batch = search_ngrams[batch_start:batch_start + batch_size]
+                ngram_batch_size = 50
+                for batch_start in range(0, len(search_ngrams), ngram_batch_size):
+                    batch = search_ngrams[batch_start:batch_start + ngram_batch_size]
                     seg_list = [f"<seg>{ng}</seg>" for ng in batch]
                     payload = {
                         "SourceLanguage": tb_src_lang,
                         "TargetLanguage": tb_tgt_lang,
                         "Segments": seg_list
                     }
-                    if diag_logged < 1:
-                        logger.log(f"  [DIAG] lookupterms payload: SrcLang={tb_src_lang}, TgtLang={tb_tgt_lang}, first 3 segs={seg_list[:3]}")
                     try:
                         result = memoq_client._make_request(
                             "POST", f"/tbs/{tb_guid}/lookupterms",
                             data=payload
                         )
-                        if diag_logged < 1:
-                            raw_str = _json.dumps(result, ensure_ascii=False)[:2000] if result else "None"
-                            logger.log(f"  [DIAG] lookupterms response ({type(result).__name__}): {raw_str}")
-                            diag_logged += 1
 
                         result_list = []
                         if isinstance(result, dict):
@@ -855,11 +844,6 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                                 for hit in hit_group:
                                     if not isinstance(hit, dict):
                                         continue
-                                    if diag_logged < 5:
-                                        hit_str = _json.dumps(hit, ensure_ascii=False)[:1000]
-                                        logger.log(f"  [DIAG] TBHit: {hit_str}")
-                                        diag_logged += 1
-
                                     # Extract terms from Entry.Languages[].TermItems[].Text
                                     entry = hit.get('Entry', hit)
                                     languages = entry.get('Languages', [])
@@ -908,7 +892,7 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                                                     target_language=tgt_code
                                                 ))
                     except Exception as e:
-                        logger.log(f"  [DIAG] TB batch error: {type(e).__name__}: {str(e)[:200]}")
+                        logger.log(f"  TB batch error: {type(e).__name__}: {str(e)[:200]}")
                         continue
 
                 logger.log(f"  TB search found {len(found_terms)} unique term pairs")
@@ -995,7 +979,8 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         
         st.session_state.bypass_stats = {
             'bypassed': len(bypass_segments),
-            'llm_sent': len(llm_segments)
+            'llm_sent': len(llm_segments),
+            'total_segments': total_segments
         }
         
         st.write(f"✅ **{len(bypass_segments)}** segments from TM (≥{acceptance_threshold}% match)")
@@ -1005,16 +990,14 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         logger.log_tm_matches(tm_context)
         logger.log_tb_matches(tb_context)
         
-        # IMPROVEMENT: Reorder LLM segments - process WITH context first
-        # This builds chat history early for better translation consistency
+        # Log TM/non-TM segment distribution (no reordering — keep original document order)
+        # Reordering was removed: mixing TM-context and non-context segments in the same batch
+        # caused the LLM to only translate TM-context segments and skip the rest.
         segments_with_context = [s for s in llm_segments if s.id in tm_context]
         segments_no_context = [s for s in llm_segments if s.id not in tm_context]
         
-        original_count = len(llm_segments)
-        llm_segments = segments_with_context + segments_no_context
-        
-        logger.log(f"Segments reordered: {len(segments_with_context)} with TM context, {len(segments_no_context)} without")
-        logger.log(f"Processing order optimized for better consistency")
+        logger.log(f"Segments: {len(segments_with_context)} with TM context, {len(segments_no_context)} without")
+        logger.log(f"Processing in original document order")
         
         # 6. Process LLM segments
         if llm_segments:
@@ -1114,6 +1097,14 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                     dnt_terms=dnt_terms
                 )
                 
+                # Defensive guard: prompt must be a non-empty string
+                if not isinstance(prompt, str) or not prompt.strip():
+                    st.error(f"❌ Prompt build failed for batch {batch_num}: prompt is {type(prompt).__name__} = {repr(prompt[:200] if prompt else prompt)}")
+                    logger.log(f"ERROR: Batch {batch_num} - prompt is None or empty, skipping")
+                    for seg in batch:
+                        match_scores[seg.id] = 0
+                    continue
+
                 try:
                     st.write("🔄 Calling LLM API...")
                     response_text, tokens = translator.translate_batch(prompt)
@@ -1170,7 +1161,14 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
                     break  # Stop processing further batches
 
                 except Exception as e:
-                    err_msg = f"Batch {batch_num} failed: {str(e)}"
+                    # Unwrap tenacity RetryError to get the real cause
+                    cause = getattr(e, '__cause__', None) or getattr(e, 'last_attempt', None)
+                    if cause is not None:
+                        real_exc = getattr(cause, 'exception', lambda: None)()
+                        real_msg = str(real_exc) if real_exc else str(cause)
+                    else:
+                        real_msg = str(e)
+                    err_msg = f"Batch {batch_num} failed: {real_msg}"
                     st.error(f"❌ {err_msg}")
                     logger.log(f"ERROR: {err_msg}")
                     for seg in batch:
@@ -1212,6 +1210,55 @@ def process_translation(xliff_bytes, tmx_bytes, csv_bytes, custom_prompt_content
         - {len(llm_segments)} segments via LLM
         - {len(final_translations)} total translations
         """)
+
+
+def _compute_analysis():
+    """Compute TM match analysis from session state. Returns dict or None."""
+    segment_match_scores = st.session_state.get('segment_match_scores', {})
+    segment_objects = st.session_state.get('segment_objects', {})
+    if not segment_match_scores or not segment_objects:
+        return None
+    analysis_by_level = {
+        '101% (Context)': {'segments': 0, 'words': 0},
+        '100%':           {'segments': 0, 'words': 0},
+        '95%-99%':        {'segments': 0, 'words': 0},
+        '85%-94%':        {'segments': 0, 'words': 0},
+        '75%-84%':        {'segments': 0, 'words': 0},
+        '50%-74%':        {'segments': 0, 'words': 0},
+        'No match':       {'segments': 0, 'words': 0},
+    }
+    total_words = 0
+    for seg_id, seg_obj in segment_objects.items():
+        clean_text = re.sub(r'<[^>]+>|\{\{\d+\}\}', '', seg_obj.source).strip()
+        wc = len(clean_text.split()) if clean_text else 0
+        total_words += wc
+        score = segment_match_scores.get(seg_id, 0)
+        if score > 100:
+            analysis_by_level['101% (Context)']['segments'] += 1
+            analysis_by_level['101% (Context)']['words'] += wc
+        elif score == 100:
+            analysis_by_level['100%']['segments'] += 1
+            analysis_by_level['100%']['words'] += wc
+        elif score >= 95:
+            analysis_by_level['95%-99%']['segments'] += 1
+            analysis_by_level['95%-99%']['words'] += wc
+        elif score >= 85:
+            analysis_by_level['85%-94%']['segments'] += 1
+            analysis_by_level['85%-94%']['words'] += wc
+        elif score >= 75:
+            analysis_by_level['75%-84%']['segments'] += 1
+            analysis_by_level['75%-84%']['words'] += wc
+        elif score >= 50:
+            analysis_by_level['50%-74%']['segments'] += 1
+            analysis_by_level['50%-74%']['words'] += wc
+        else:
+            analysis_by_level['No match']['segments'] += 1
+            analysis_by_level['No match']['words'] += wc
+    return {
+        'total_segments': len(segment_objects),
+        'total_words': total_words,
+        'by_level': analysis_by_level,
+    }
 
 
 # --- UI Layout ---
@@ -1408,6 +1455,13 @@ with tab1:
             else:
                 st.error("XLIFF file is required.")
 
+    # --- Analysis results shown inline after translation completes ---
+    if st.session_state.translation_results:
+        _analysis = _compute_analysis()
+        if _analysis:
+            st.divider()
+            show_analysis_screen(_analysis)
+
 # === TAB 2: RESULTS ===
 with tab2:
     if st.session_state.translation_results:
@@ -1415,7 +1469,7 @@ with tab2:
         
         col_stat1, col_stat2, col_stat3 = st.columns(3)
         with col_stat1:
-            st.metric("Total Segments", len(st.session_state.translation_results))
+            st.metric("Total Segments", st.session_state.bypass_stats.get('total_segments', len(st.session_state.translation_results)))
         with col_stat2:
             bypassed = st.session_state.bypass_stats.get('bypassed', 0)
             st.metric(f"From TM (≥{acceptance_threshold}%)", bypassed)
@@ -1474,56 +1528,13 @@ with tab2:
         df = pd.DataFrame(preview_data)
         st.dataframe(df, width="stretch")
 
-        # --- TM Analysis (computed from translation match scores) ---
-        segment_match_scores = st.session_state.get('segment_match_scores', {})
-        segment_objects = st.session_state.get('segment_objects', {})
-        if segment_match_scores and segment_objects:
+        # --- TM Analysis ---
+        _tab2_analysis = _compute_analysis()
+        if _tab2_analysis:
             st.divider()
             st.subheader("📊 TM Match Analysis")
+            show_analysis_screen(_tab2_analysis)
 
-            analysis_by_level = {
-                '101% (Context)': {'segments': 0, 'words': 0},
-                '100%': {'segments': 0, 'words': 0},
-                '95%-99%': {'segments': 0, 'words': 0},
-                '85%-94%': {'segments': 0, 'words': 0},
-                '75%-84%': {'segments': 0, 'words': 0},
-                '50%-74%': {'segments': 0, 'words': 0},
-                'No match': {'segments': 0, 'words': 0}
-            }
-            total_words_analysis = 0
-            for seg_id, seg_obj in segment_objects.items():
-                clean_text = re.sub(r'<[^>]+>|\{\{\d+\}\}', '', seg_obj.source).strip()
-                wc = len(clean_text.split()) if clean_text else 0
-                total_words_analysis += wc
-                score = segment_match_scores.get(seg_id, 0)
-                if score > 100:
-                    analysis_by_level['101% (Context)']['segments'] += 1
-                    analysis_by_level['101% (Context)']['words'] += wc
-                elif score == 100:
-                    analysis_by_level['100%']['segments'] += 1
-                    analysis_by_level['100%']['words'] += wc
-                elif score >= 95:
-                    analysis_by_level['95%-99%']['segments'] += 1
-                    analysis_by_level['95%-99%']['words'] += wc
-                elif score >= 85:
-                    analysis_by_level['85%-94%']['segments'] += 1
-                    analysis_by_level['85%-94%']['words'] += wc
-                elif score >= 75:
-                    analysis_by_level['75%-84%']['segments'] += 1
-                    analysis_by_level['75%-84%']['words'] += wc
-                elif score >= 50:
-                    analysis_by_level['50%-74%']['segments'] += 1
-                    analysis_by_level['50%-74%']['words'] += wc
-                else:
-                    analysis_by_level['No match']['segments'] += 1
-                    analysis_by_level['No match']['words'] += wc
-
-            post_analysis_results = {
-                'total_segments': len(segment_objects),
-                'total_words': total_words_analysis,
-                'by_level': analysis_by_level
-            }
-            show_analysis_screen(post_analysis_results)
 
     else:
         st.info("No results yet. Run translation in Workspace tab.")
@@ -1699,4 +1710,4 @@ with tab3:
             - Formatting rules
             - Terminology categories
             """)
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     
+                                                                                                                                                                                                                                                                                                                                                                                                                                             
