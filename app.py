@@ -14,7 +14,7 @@ from utils.logger import TransactionLogger
 import config
 from services.memoq_server_client import MemoQServerClient
 from services.memoq_ui import MemoQUI
-from analysis_screen import show_analysis_screen, show_qa_section
+from analysis_screen import show_analysis_screen
 # --- Setup ---
 st.set_page_config(page_title=config.APP_NAME, layout="wide", page_icon="🌍")
 
@@ -77,13 +77,6 @@ if 'batch_size' not in st.session_state:
     st.session_state.batch_size = 20
 if 'segment_match_scores' not in st.session_state:
     st.session_state.segment_match_scores = {}
-# QA state
-if 'qa_issues' not in st.session_state:
-    st.session_state.qa_issues = None
-if 'xliff_bytes' not in st.session_state:
-    st.session_state.xliff_bytes = None
-if 'xliff_filename' not in st.session_state:
-    st.session_state.xliff_filename = None
 
 # --- Sidebar ---
 with st.sidebar:
@@ -1289,8 +1282,6 @@ with tab1:
         if xliff_file:
             xliff_file.seek(0)
             detected_src, detected_tgt = XMLParser.detect_languages(xliff_file.getvalue())
-            st.session_state.xliff_bytes = xliff_file.getvalue()
-            st.session_state.xliff_filename = xliff_file.name
             if detected_src and detected_tgt:
                 st.session_state.detected_languages = {
                     'source': detected_src,
@@ -1544,7 +1535,6 @@ with tab2:
             st.subheader("📊 TM Match Analysis")
             show_analysis_screen(_tab2_analysis)
 
-        show_qa_section()
 
     else:
         st.info("No results yet. Run translation in Workspace tab.")
