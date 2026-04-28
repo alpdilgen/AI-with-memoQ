@@ -393,6 +393,7 @@ class VerifikaQAClient:
 
         uploaded = 0
         chunk_idx = 0
+        uploaded_indices: list = []
 
         with io.BytesIO(file_bytes) as buf:
             while uploaded < total:
@@ -411,19 +412,23 @@ class VerifikaQAClient:
                         "ProjectId": project_id,
                     },
                 )
+                uploaded_indices.append(chunk_idx)
                 uploaded += len(chunk)
                 chunk_idx += 1
                 if progress_cb:
                     progress_cb(uploaded, total)
 
         # Commit — server expects PascalCase here too.
+        # 'Indices' is the list of chunk indices that were successfully
+        # uploaded (server validates 0..N coverage and order).
         commit_resp = self._request(
             "POST", "/api/ProjectFiles/CommitFile",
             json_body={
-                "ProjectId": project_id,
-                "FileName":  file_name,
-                "FileId":    file_id,
-                "TotalSize": total,
+                "ProjectId":   project_id,
+                "FileName":    file_name,
+                "FileId":      file_id,
+                "Indices":     uploaded_indices,
+                "TotalSize":   total,
                 "TotalChunks": chunk_idx,
             },
         )
