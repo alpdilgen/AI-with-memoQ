@@ -500,49 +500,90 @@ class VerifikaQAClient:
         poll_interval: int = DEFAULT_POLL_INTERVAL,
         timeout: int = DEFAULT_POLL_TIMEOUT,
         progress_cb: Optional[Callable[[Dict], None]] = None,
+        min_settle_seconds: int = 6,
     ) -> Dict:
         """
-        Poll /api/projects/{pid}/tasks until our task reports completion.
+        Poll until the task is completed.
 
-        Heuristics for "done":
-            - status != 0          (0 == new/running)
-            - or leftCount == 0 AND task has been touched
-              (modifiedOn > createdOn)
+        Verifika's task object exposes `status`, `acceptanceStatus`,
+        `leftCount` and `correctedCount`. None of these alone proves
+        completion (in our HAR they all stayed at 0 for a fresh task
+        before issues appeared). The robust signal is the project
+        endpoint's `taskSummary` — `checked`/`completed` go up only
+        after QA actually finishes.
 
-        Returns the final task dict.
+        Algorithm:
+          1. Read the task to keep UI updated (progress_cb).
+          2. Read the project; if `taskSummary.checked` or
+             `taskSummary.completed` >= 1 → done.
+          3. Also fetch /api/QualityIssues — if it returns a
+             non-empty list, QA produced output → done.
+          4. Otherwise wait `min_settle_seconds` after `tasks/{id}/check`
+             before declaring "no issues" success (avoids racing the
+             server which sometimes reports leftCount=0 instantly).
         """
         deadline = time.time() + timeout
+        started_at = time.time()
         last_task: Dict = {}
-        first_seen = None
+        last_summary: Dict = {}
 
         while time.time() < deadline:
-            tasks = self.list_tasks(project_id)
+            # 1. Task status (for UI progress)
+            try:
+                tasks = self.list_tasks(project_id)
+            except VerifikaError:
+                tasks = []
             ours = [t for t in tasks if t.get("id") == task_id]
             if ours:
-                t = ours[0]
-                last_task = t
-                if first_seen is None:
-                    first_seen = t.get("createdOn")
+                last_task = ours[0]
                 if progress_cb:
-                    progress_cb(t)
+                    progress_cb(last_task)
 
-                status = t.get("status", 0)
-                left = t.get("leftCount", 0)
-                modified = t.get("modifiedOn")
-                # Verifika sets status > 0 when QA finishes (1=ready,
-                # 2=accepted, etc). leftCount drops to 0 progressively.
-                if status and status != 0:
-                    return t
-                if (left == 0 and modified and first_seen
-                        and modified != first_seen):
-                    # Progress was made and now nothing left.
-                    return t
+            # 2. Project taskSummary — most reliable completion signal
+            try:
+                project = self.get_project(project_id)
+                summary = project.get("taskSummary", {}) or {}
+                last_summary = summary
+                checked   = int(summary.get("checked", 0) or 0)
+                completed = int(summary.get("completed", 0) or 0)
+                review    = int(summary.get("review", 0) or 0)
+                if checked >= 1 or completed >= 1 or review >= 1:
+                    logger.info("Verifika: task done via taskSummary %s", summary)
+                    return last_task or {"id": task_id, "summary": summary}
+            except VerifikaError as e:
+                logger.debug("get_project failed during poll: %s", e)
+
+            # 3. QualityIssues — non-empty list also implies "done"
+            try:
+                issues = self.get_quality_issues(project_id, task_id)
+                if issues:
+                    logger.info("Verifika: task done — %d issues visible",
+                                len(issues))
+                    return last_task or {"id": task_id, "issuesFound": len(issues)}
+            except VerifikaError:
+                pass
+
+            # 4. After a settle period without any signal, treat as
+            #    "no issues found" success.
+            elapsed = time.time() - started_at
+            if elapsed >= min_settle_seconds and last_task:
+                t = last_task
+                if (int(t.get("leftCount", 0) or 0) == 0
+                        and int(t.get("correctedCount", 0) or 0) == 0):
+                    # Heuristic: server has been at zero for >= settle
+                    # window AND project summary still empty → file has
+                    # no detectable QA issues.
+                    if elapsed >= min_settle_seconds * 3:
+                        logger.info(
+                            "Verifika: no signal after %.0fs — "
+                            "assuming clean file (no issues)", elapsed)
+                        return t
 
             time.sleep(poll_interval)
 
         raise VerifikaError(
             f"Task {task_id} not finished after {timeout}s "
-            f"(last status: {last_task})"
+            f"(last task: {last_task}, summary: {last_summary})"
         )
 
     # ── Quality issues ──────────────────────────────────────────────────────

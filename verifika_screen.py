@@ -271,7 +271,11 @@ def _run_qa_workflow(client: VerifikaQAClient, qa_settings_id: str):
         if stage == "qa_progress":
             left = payload.get("leftCount", "?")
             corr = payload.get("correctedCount", "?")
-            msg = f"⏳ Polling… leftCount={left}, correctedCount={corr}"
+            ign  = payload.get("ignoredCount", "?")
+            status = payload.get("status", "?")
+            acc = payload.get("acceptanceStatus", "?")
+            msg = (f"⏳ Polling… status={status}, accept={acc}, "
+                   f"left={left}, corrected={corr}, ignored={ign}")
         elif stage == "issues_fetched":
             msg = f"📥 {payload.get('count', 0)} issue(s) fetched"
         else:
