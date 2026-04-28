@@ -235,6 +235,73 @@ class VerifikaQAClient:
         # Should be unreachable
         raise VerifikaError(f"{method} {path}: exhausted retries")
 
+    def _request_multipart(
+        self,
+        method: str,
+        path: str,
+        *,
+        files: Dict,
+        data_fields: Optional[Dict] = None,
+        params: Optional[Dict] = None,
+    ) -> Dict | str | bytes:
+        """
+        Multipart/form-data variant of _request.
+
+        Used for endpoints that expect a real multipart upload such as
+        /api/ProjectFiles/UploadChunkFile, where the server validates
+        named form fields (File, Index, FileId, FileName, ProjectId).
+
+        Args:
+            files:        dict for `requests.post(files=...)`, e.g.
+                          {"File": (filename, bytes, "application/xml")}
+            data_fields:  dict of form fields sent alongside the file
+                          (FileName, ProjectId, Index, FileId, ...).
+            params:       optional query string (api-version is added).
+
+        Returns parsed JSON or raw text/bytes per server response.
+        """
+        self._ensure_auth()
+        url = f"{self.base_url}{path}"
+        merged_params = {"api-version": self.api_version, **(params or {})}
+        # NOTE: do NOT set Content-Type — requests builds the multipart
+        # boundary header automatically.
+        merged_headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self._token}" if self._token else "",
+        }
+
+        for attempt in (1, 2):
+            resp = self._session.request(
+                method, url,
+                params=merged_params,
+                files=files,
+                data=data_fields or {},
+                headers=merged_headers,
+                timeout=self.timeout,
+                verify=self.verify_ssl,
+            )
+
+            if resp.status_code == 401 and attempt == 1 and self._username:
+                logger.warning("Verifika: 401 on multipart, re-auth + retry once")
+                self._token = None
+                self._ensure_auth()
+                merged_headers["Authorization"] = f"Bearer {self._token}"
+                continue
+
+            if resp.status_code >= 400:
+                raise VerifikaError(
+                    f"{method} {path} failed: HTTP {resp.status_code}",
+                    status_code=resp.status_code,
+                    response_body=resp.text[:1500],
+                )
+
+            ctype = resp.headers.get("Content-Type", "")
+            if "application/json" in ctype:
+                return resp.json()
+            return resp.text or resp.content
+
+        raise VerifikaError(f"{method} {path}: exhausted retries (multipart)")
+
     # ── User / health ───────────────────────────────────────────────────────
 
     def get_current_user(self) -> Dict:
@@ -298,6 +365,13 @@ class VerifikaQAClient:
         Chunked upload to /api/ProjectFiles/UploadChunkFile, then
         /api/ProjectFiles/CommitFile to finalize.
 
+        Real-server contract (PascalCase, multipart/form-data):
+            File:      multipart file blob (one chunk)
+            Index:     0-based chunk index
+            FileId:    stable uuid-like id shared by every chunk of one file
+            FileName:  original file name
+            ProjectId: target project uuid
+
         Args:
             project_id:  Verifika project uuid.
             file_bytes:  XLIFF bytes (final translated file).
@@ -307,13 +381,16 @@ class VerifikaQAClient:
 
         Returns the CommitFile response (file metadata dict).
         """
+        import uuid
+
         total = len(file_bytes)
         if total == 0:
             raise VerifikaError("Cannot upload empty file")
 
-        # Verifika's chunk API needs a stable identifier across chunks.
-        # We use a deterministic id based on project + filename + size.
-        upload_id = f"{project_id}_{file_name}_{total}"
+        # Stable identifier across chunks of this file. Uuid keeps it
+        # collision-free across concurrent uploads.
+        file_id = str(uuid.uuid4())
+
         uploaded = 0
         chunk_idx = 0
 
@@ -322,35 +399,36 @@ class VerifikaQAClient:
                 chunk = buf.read(chunk_size)
                 if not chunk:
                     break
-                self._request(
+                self._request_multipart(
                     "POST", "/api/ProjectFiles/UploadChunkFile",
-                    params={
-                        "projectId": project_id,
-                        "fileName": file_name,
-                        "uploadId": upload_id,
-                        "chunkIndex": chunk_idx,
-                        "totalSize": total,
+                    files={
+                        "File": (file_name, chunk, "application/octet-stream"),
                     },
-                    data=chunk,
-                    headers={"Content-Type": "application/octet-stream"},
+                    data_fields={
+                        "Index":     str(chunk_idx),
+                        "FileId":    file_id,
+                        "FileName":  file_name,
+                        "ProjectId": project_id,
+                    },
                 )
                 uploaded += len(chunk)
                 chunk_idx += 1
                 if progress_cb:
                     progress_cb(uploaded, total)
 
-        # Commit
+        # Commit — server expects PascalCase here too.
         commit_resp = self._request(
             "POST", "/api/ProjectFiles/CommitFile",
             json_body={
-                "projectId": project_id,
-                "fileName": file_name,
-                "uploadId": upload_id,
-                "totalSize": total,
+                "ProjectId": project_id,
+                "FileName":  file_name,
+                "FileId":    file_id,
+                "TotalSize": total,
+                "TotalChunks": chunk_idx,
             },
         )
-        logger.info("Verifika: committed file %s (%d bytes, %d chunks)",
-                    file_name, total, chunk_idx)
+        logger.info("Verifika: committed file %s (%d bytes, %d chunks, fileId=%s)",
+                    file_name, total, chunk_idx, file_id)
         return commit_resp
 
     # ── Reports ─────────────────────────────────────────────────────────────
