@@ -1,34 +1,50 @@
 """
-Verifika QA API Client
-Handles authentication, project lifecycle, file upload, QA execution, and
-quality issue retrieval against the Verifika cloud QA API.
+Verifika QA API Client (v2 — task-based workflow)
 
-API base:  https://beta.e-verifika.com
-Docs:      https://documenter.getpostman.com/view/50753647/2sBXqGsNJk
+Built from a real HAR capture of the Verifika web UI's "Start QA" button.
+The actual server contract is task-based, NOT report-based as the public
+Postman docs imply. The chain is:
 
-Authentication strategy
------------------------
-The client supports two flows:
+    1. POST  /api/Projects                          (create project,
+                                                    optionally with qaSettingsId)
+    2. POST  /api/ProjectFiles/UploadChunkFile      (multipart, repeated)
+    3. POST  /api/ProjectFiles/CommitFile           (best-effort; file is
+                                                    typically usable even
+                                                    without it)
+    4. POST  /api/Projects/{pid}/start              <— this single call
+                                                    creates the task and
+                                                    assigns it
+        body: {"assignments":[{"allFiles":true,
+                               "assignedToId":"<user-guid>"}]}
+    5. GET   /api/projects/{pid}/tasks              (read taskId)
+    6. POST  /api/projects/{pid}/tasks/accept       (no body)
+    7. POST  /api/projects/{pid}/tasks/{tid}/check  (no body — runs QA)
+    8. GET   /api/projects/{pid}/tasks              (poll: leftCount → 0)
+    9. GET   /api/QualityIssues?projectId=...&taskId=...
 
-  1. Bearer token (preferred for headless use): pass `api_token=...`
-     to the constructor. Header: `Authorization: Bearer <token>`.
-  2. Username/password login: call `login()` after construction; the
-     client requests a token from /api/auth/login and refreshes it
-     before expiry. Used when no long-lived API token is available.
+The web UI also opens https://beta.e-verifika.com/report/{pid}/formal
+to display the rich QA review screen. We expose that URL too so the
+Streamlit tab can offer an iframe + open-in-new-tab fallback.
 
-Both flows put the same `Authorization: Bearer <token>` header on every
-request afterwards.
+Authentication
+--------------
+Long-lived Bearer token (preferred). The token is the value of
+`access_token` in the Verifika web app's localStorage. JWT payload
+typically contains `sub` (user GUID) — useful for assignedToId without
+calling /api/Users/current.
 
-Designed to be reusable: the same client class is used by the Streamlit
-UI today and is easy to lift into a standalone backend service later.
+This client is UI-agnostic (no streamlit imports), so it can be lifted
+into a standalone backend later.
 """
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import logging
 import time
+import uuid
 from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -43,13 +59,12 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BASE_URL = "https://beta.e-verifika.com"
 DEFAULT_API_VERSION = "1.0"
-DEFAULT_CHUNK_SIZE = 5 * 1024 * 1024   # 5 MB per chunk for UploadChunkFile
-DEFAULT_POLL_INTERVAL = 3              # seconds between polling tries
-DEFAULT_POLL_TIMEOUT = 300             # 5 minutes max per QA report
+DEFAULT_CHUNK_SIZE = 5 * 1024 * 1024   # 5 MB per chunk
+DEFAULT_POLL_INTERVAL = 3              # seconds
+DEFAULT_POLL_TIMEOUT = 600             # 10 minutes max
 
-# issueType code → human-readable label.
-# Verifika docs do not publish the full enum; values below are derived from
-# observed responses and may need refinement once we run real reports.
+# issueType code → human label.
+# Verifika does not publish the enum; values learned by inspection.
 ISSUE_TYPE_LABELS = {
     0: "Spelling",
     1: "Terminology",
@@ -60,13 +75,10 @@ ISSUE_TYPE_LABELS = {
 }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Data classes (lightweight; we keep dicts on the wire and only normalise)
-# ─────────────────────────────────────────────────────────────────────────────
-
 class VerifikaError(Exception):
-    """Raised for any Verifika API error (HTTP, auth, business)."""
-    def __init__(self, message: str, status_code: Optional[int] = None,
+    """Raised for any Verifika API failure (HTTP, auth, validation)."""
+    def __init__(self, message: str,
+                 status_code: Optional[int] = None,
                  response_body: Optional[str] = None):
         super().__init__(message)
         self.status_code = status_code
@@ -78,7 +90,7 @@ class VerifikaError(Exception):
 # ─────────────────────────────────────────────────────────────────────────────
 
 class VerifikaQAClient:
-    """REST client for Verifika QA API."""
+    """REST client for the Verifika QA API."""
 
     def __init__(
         self,
@@ -90,16 +102,6 @@ class VerifikaQAClient:
         verify_ssl: bool = True,
         timeout: int = 60,
     ):
-        """
-        Args:
-            base_url:    API root (no trailing slash). Default beta.e-verifika.com.
-            api_token:   Long-lived Bearer token. If provided, login() is skipped.
-            username:    For password-based login. Only used if api_token is None.
-            password:    For password-based login.
-            api_version: Sent as ?api-version= on every request.
-            verify_ssl:  TLS verify flag (True for production).
-            timeout:     Per-request timeout (seconds).
-        """
         self.base_url = base_url.rstrip("/")
         self.api_version = api_version
         self.verify_ssl = verify_ssl
@@ -109,33 +111,24 @@ class VerifikaQAClient:
         self._token_expiry: Optional[datetime] = None
         self._username = username
         self._password = password
+        self._cached_user_id: Optional[str] = None
 
         self._session = requests.Session()
 
     # ── Auth ────────────────────────────────────────────────────────────────
 
     def login(self) -> None:
-        """
-        Authenticate with username/password and obtain a Bearer token.
-        Skipped if `api_token` was passed to the constructor.
-        """
+        """Login with username/password (skipped when api_token is set)."""
         if self._token and not self._username:
-            # Static token mode — nothing to do.
             return
-
         if not (self._username and self._password):
             raise VerifikaError(
-                "Cannot login: no api_token and no username/password provided"
+                "Cannot login: no api_token and no username/password"
             )
-
-        # Endpoint name follows the pattern documented in the Postman
-        # collection. If the real endpoint differs (e.g. /api/auth/token)
-        # we adjust here without touching call sites.
         url = f"{self.base_url}/api/auth/login"
-        payload = {"username": self._username, "password": self._password}
-
         resp = self._session.post(
-            url, json=payload,
+            url,
+            json={"username": self._username, "password": self._password},
             headers={"Accept": "application/json", "Content-Type": "application/json"},
             params={"api-version": self.api_version},
             timeout=self.timeout, verify=self.verify_ssl,
@@ -143,39 +136,80 @@ class VerifikaQAClient:
         if resp.status_code >= 400:
             raise VerifikaError(
                 f"Login failed: HTTP {resp.status_code}",
-                status_code=resp.status_code,
-                response_body=resp.text,
-            )
+                status_code=resp.status_code, response_body=resp.text)
         data = resp.json()
-        self._token = data.get("token") or data.get("accessToken") or data.get("access_token")
+        self._token = (data.get("token") or data.get("accessToken")
+                       or data.get("access_token"))
         if not self._token:
             raise VerifikaError(f"Login response missing token: {data}")
-
-        # If response contains expiry, honour it; otherwise assume 1 h.
-        expires_in = data.get("expiresIn") or data.get("expires_in") or 3600
-        self._token_expiry = datetime.utcnow() + timedelta(seconds=int(expires_in) - 60)
-        logger.info("Verifika: authenticated, token expires in %ss", expires_in)
+        expires_in = int(data.get("expiresIn") or data.get("expires_in") or 3600)
+        self._token_expiry = datetime.utcnow() + timedelta(seconds=expires_in - 60)
 
     def _ensure_auth(self) -> None:
-        """Refresh token if it is missing or close to expiry."""
         if not self._token:
-            self.login()
-            return
+            self.login(); return
         if self._token_expiry and datetime.utcnow() >= self._token_expiry:
-            logger.info("Verifika: token expired, refreshing")
             self._token = None
             self.login()
+
+    # ── User / GUID extraction ─────────────────────────────────────────────
+
+    def get_current_user_id(self) -> str:
+        """
+        Return the GUID of the currently authenticated user.
+
+        Strategy:
+          1. Cache hit
+          2. Decode JWT payload's `sub` claim (no HTTP call)
+          3. Fallback: GET /api/Users/current
+        """
+        if self._cached_user_id:
+            return self._cached_user_id
+
+        # JWT decode (no signature verification — we trust the issuer)
+        if self._token and self._token.count(".") == 2:
+            try:
+                _, payload_b64, _ = self._token.split(".")
+                # base64url padding
+                pad = "=" * (-len(payload_b64) % 4)
+                payload = json.loads(base64.urlsafe_b64decode(payload_b64 + pad))
+                uid = (payload.get("sub") or payload.get("userId")
+                       or payload.get("id"))
+                if uid:
+                    self._cached_user_id = uid
+                    return uid
+            except Exception as e:
+                logger.debug("JWT decode failed: %s", e)
+
+        # Fallback to /api/Users/current
+        try:
+            data = self._request("GET", "/api/Users/current")
+            uid = data.get("id") or data.get("Id")
+            if uid:
+                self._cached_user_id = uid
+                return uid
+        except VerifikaError:
+            pass
+
+        raise VerifikaError(
+            "Could not determine current user GUID — "
+            "JWT 'sub' claim missing and /api/Users/current failed"
+        )
+
+    def get_current_user(self) -> Dict:
+        """`GET /api/Users/current` — full user record."""
+        return self._request("GET", "/api/Users/current")
 
     # ── HTTP plumbing ───────────────────────────────────────────────────────
 
     def _headers(self, extra: Optional[Dict] = None) -> Dict[str, str]:
-        headers = {
+        h = {
             "Accept": "application/json",
             "Authorization": f"Bearer {self._token}" if self._token else "",
         }
         if extra:
-            headers.update(extra)
-        return headers
+            h.update(extra)
+        return h
 
     def _request(
         self,
@@ -183,18 +217,19 @@ class VerifikaQAClient:
         path: str,
         *,
         params: Optional[Dict] = None,
-        json_body: Optional[Dict] = None,
+        json_body=None,
         data: Optional[bytes] = None,
         headers: Optional[Dict] = None,
         accept_text: bool = False,
-    ) -> Dict | str | bytes:
-        """
-        Single point for every HTTP request. Adds api-version, Bearer
-        header, retries once on 401, and decodes JSON or raw bytes.
-        """
+        api_version_override: Optional[str] = None,
+    ):
+        """JSON-ish request. json_body may be dict OR list."""
         self._ensure_auth()
         url = f"{self.base_url}{path}"
-        merged_params = {"api-version": self.api_version, **(params or {})}
+        merged_params = {
+            "api-version": api_version_override or self.api_version,
+            **(params or {}),
+        }
         merged_headers = self._headers(headers)
         if accept_text:
             merged_headers["Accept"] = "text/plain"
@@ -210,29 +245,27 @@ class VerifikaQAClient:
                 verify=self.verify_ssl,
             )
 
-            # Auto-recover on expired token (only if username/password is set)
             if resp.status_code == 401 and attempt == 1 and self._username:
-                logger.warning("Verifika: 401, re-authenticating and retrying once")
                 self._token = None
                 self._ensure_auth()
-                merged_headers = self._headers(headers)
-                if accept_text:
-                    merged_headers["Accept"] = "text/plain"
+                merged_headers["Authorization"] = f"Bearer {self._token}"
                 continue
 
             if resp.status_code >= 400:
                 raise VerifikaError(
                     f"{method} {path} failed: HTTP {resp.status_code}",
                     status_code=resp.status_code,
-                    response_body=resp.text[:1000],
+                    response_body=resp.text[:1500],
                 )
 
             ctype = resp.headers.get("Content-Type", "")
-            if "application/json" in ctype:
+            # Verifika often returns "text/json" too
+            if "json" in ctype:
+                if not resp.text:
+                    return None
                 return resp.json()
             return resp.text if accept_text else resp.content
 
-        # Should be unreachable
         raise VerifikaError(f"{method} {path}: exhausted retries")
 
     def _request_multipart(
@@ -243,28 +276,11 @@ class VerifikaQAClient:
         files: Dict,
         data_fields: Optional[Dict] = None,
         params: Optional[Dict] = None,
-    ) -> Dict | str | bytes:
-        """
-        Multipart/form-data variant of _request.
-
-        Used for endpoints that expect a real multipart upload such as
-        /api/ProjectFiles/UploadChunkFile, where the server validates
-        named form fields (File, Index, FileId, FileName, ProjectId).
-
-        Args:
-            files:        dict for `requests.post(files=...)`, e.g.
-                          {"File": (filename, bytes, "application/xml")}
-            data_fields:  dict of form fields sent alongside the file
-                          (FileName, ProjectId, Index, FileId, ...).
-            params:       optional query string (api-version is added).
-
-        Returns parsed JSON or raw text/bytes per server response.
-        """
+    ):
+        """Multipart/form-data variant for chunk uploads."""
         self._ensure_auth()
         url = f"{self.base_url}{path}"
         merged_params = {"api-version": self.api_version, **(params or {})}
-        # NOTE: do NOT set Content-Type — requests builds the multipart
-        # boundary header automatically.
         merged_headers = {
             "Accept": "application/json",
             "Authorization": f"Bearer {self._token}" if self._token else "",
@@ -280,78 +296,69 @@ class VerifikaQAClient:
                 timeout=self.timeout,
                 verify=self.verify_ssl,
             )
-
             if resp.status_code == 401 and attempt == 1 and self._username:
-                logger.warning("Verifika: 401 on multipart, re-auth + retry once")
                 self._token = None
                 self._ensure_auth()
                 merged_headers["Authorization"] = f"Bearer {self._token}"
                 continue
-
             if resp.status_code >= 400:
                 raise VerifikaError(
                     f"{method} {path} failed: HTTP {resp.status_code}",
                     status_code=resp.status_code,
                     response_body=resp.text[:1500],
                 )
-
             ctype = resp.headers.get("Content-Type", "")
-            if "application/json" in ctype:
+            if "json" in ctype:
+                if not resp.text:
+                    return None
                 return resp.json()
             return resp.text or resp.content
 
         raise VerifikaError(f"{method} {path}: exhausted retries (multipart)")
 
-    # ── User / health ───────────────────────────────────────────────────────
-
-    def get_current_user(self) -> Dict:
-        """`GET /api/Users/current` — sanity check the auth header works."""
-        return self._request("GET", "/api/Users/current")
-
-    # ── QA settings (profiles) ─────────────────────────────────────────────
+    # ── QA settings ─────────────────────────────────────────────────────────
 
     def list_qa_settings(self) -> List[Dict]:
         """`GET /api/QASettings` — list available QA profiles."""
-        result = self._request("GET", "/api/QASettings")
+        result = self._request("GET", "/api/QASettings",
+                               api_version_override="1.1")
         if isinstance(result, list):
             return result
         if isinstance(result, dict):
-            # Some Verifika endpoints wrap lists in {"value": [...]} or {"items": [...]}
-            for key in ("value", "items", "results"):
-                if key in result and isinstance(result[key], list):
-                    return result[key]
+            for k in ("value", "items", "results", "data"):
+                if isinstance(result.get(k), list):
+                    return result[k]
         return []
 
     # ── Project lifecycle ───────────────────────────────────────────────────
 
-    def create_project(self, name: str, source_lang: Optional[str] = None,
-                       target_lang: Optional[str] = None) -> Dict:
+    def create_project(
+        self,
+        name: str,
+        qa_settings_id: Optional[str] = None,
+        source_lang: Optional[str] = None,
+        target_lang: Optional[str] = None,
+    ) -> Dict:
         """
-        `POST /api/Projects` — create an empty Verifika project.
+        `POST /api/Projects` — create a project.
 
-        Args:
-            name: Display name (we use XLIFF base name + timestamp).
-            source_lang / target_lang: optional language hints (memoQ codes
-                e.g. 'eng-US', 'tur'). Verifika may accept these as
-                metadata; we send them when known.
-
-        Returns the project dict including its `id` (uuid).
+        If `qa_settings_id` is provided, it is set on the project at
+        creation time (matches what the Verifika UI does).
         """
         body: Dict = {"name": name}
+        if qa_settings_id:
+            body["qaSettingsId"] = qa_settings_id
         if source_lang:
             body["sourceLanguage"] = source_lang
         if target_lang:
             body["targetLanguage"] = target_lang
         return self._request("POST", "/api/Projects", json_body=body)
 
-    def assign_qa_profile(self, project_id: str, qa_settings_id: str) -> Dict:
-        """`POST /api/Projects/:id/ChangeQASettings` — apply a QA profile."""
-        return self._request(
-            "POST", f"/api/Projects/{project_id}/ChangeQASettings",
-            json_body={"qaSettingsId": qa_settings_id},
-        )
+    def get_project(self, project_id: str) -> Dict:
+        """`GET /api/Projects/{id}`."""
+        return self._request("GET", f"/api/Projects/{project_id}")
 
-    # ── File upload (chunked) ───────────────────────────────────────────────
+    # ── File upload ─────────────────────────────────────────────────────────
 
     def upload_file(
         self,
@@ -360,40 +367,30 @@ class VerifikaQAClient:
         file_name: str,
         chunk_size: int = DEFAULT_CHUNK_SIZE,
         progress_cb: Optional[Callable[[int, int], None]] = None,
+        commit: bool = True,
     ) -> Dict:
         """
-        Chunked upload to /api/ProjectFiles/UploadChunkFile, then
-        /api/ProjectFiles/CommitFile to finalize.
+        Chunked multipart upload + commit.
 
-        Real-server contract (PascalCase, multipart/form-data):
-            File:      multipart file blob (one chunk)
+        Per chunk (multipart/form-data):
+            File:      blob
             Index:     0-based chunk index
-            FileId:    stable uuid-like id shared by every chunk of one file
-            FileName:  original file name
-            ProjectId: target project uuid
+            FileId:    uuid4 shared by all chunks of this file
+            FileName:  original filename
+            ProjectId: project uuid
 
-        Args:
-            project_id:  Verifika project uuid.
-            file_bytes:  XLIFF bytes (final translated file).
-            file_name:   Original filename for display in Verifika.
-            chunk_size:  Bytes per chunk (default 5 MB).
-            progress_cb: Optional callable(uploaded_bytes, total_bytes).
-
-        Returns the CommitFile response (file metadata dict).
+        Commit (JSON body, if commit=True):
+            ProjectId, FileName, FileId, Indices ("0,1,2"),
+            TotalSize, TotalChunks
         """
-        import uuid
-
         total = len(file_bytes)
         if total == 0:
             raise VerifikaError("Cannot upload empty file")
 
-        # Stable identifier across chunks of this file. Uuid keeps it
-        # collision-free across concurrent uploads.
         file_id = str(uuid.uuid4())
-
         uploaded = 0
         chunk_idx = 0
-        uploaded_indices: list = []
+        uploaded_indices: List[int] = []
 
         with io.BytesIO(file_bytes) as buf:
             while uploaded < total:
@@ -402,9 +399,7 @@ class VerifikaQAClient:
                     break
                 self._request_multipart(
                     "POST", "/api/ProjectFiles/UploadChunkFile",
-                    files={
-                        "File": (file_name, chunk, "application/octet-stream"),
-                    },
+                    files={"File": (file_name, chunk, "application/octet-stream")},
                     data_fields={
                         "Index":     str(chunk_idx),
                         "FileId":    file_id,
@@ -418,148 +413,214 @@ class VerifikaQAClient:
                 if progress_cb:
                     progress_cb(uploaded, total)
 
-        # Commit — server expects PascalCase here too.
-        # 'Indices' is the list of chunk indices that were successfully
-        # uploaded (server validates 0..N coverage and order).
-        commit_resp = self._request(
-            "POST", "/api/ProjectFiles/CommitFile",
-            json_body={
-                "ProjectId":   project_id,
-                "FileName":    file_name,
-                "FileId":      file_id,
-                "Indices":     ",".join(str(i) for i in uploaded_indices),
-                "TotalSize":   total,
-                "TotalChunks": chunk_idx,
-            },
-        )
-        logger.info("Verifika: committed file %s (%d bytes, %d chunks, fileId=%s)",
-                    file_name, total, chunk_idx, file_id)
-        return commit_resp
+        commit_resp: Dict = {}
+        if commit:
+            try:
+                commit_resp = self._request(
+                    "POST", "/api/ProjectFiles/CommitFile",
+                    json_body={
+                        "ProjectId":   project_id,
+                        "FileName":    file_name,
+                        "FileId":      file_id,
+                        "Indices":     ",".join(str(i) for i in uploaded_indices),
+                        "TotalSize":   total,
+                        "TotalChunks": chunk_idx,
+                    },
+                ) or {}
+            except VerifikaError as e:
+                # The HAR shows that the file is usable even when CommitFile
+                # complains (it persists during chunk upload). Log and move on.
+                logger.warning("CommitFile failed (non-fatal): %s", e)
 
-    # ── Reports ─────────────────────────────────────────────────────────────
+        return {"fileId": file_id, "totalChunks": chunk_idx,
+                "commit": commit_resp}
 
-    def create_report(self, project_id: str) -> str:
-        """
-        `POST /api/Reports` — generate a new report id for this project.
-        Returns the report uuid (string).
-        """
-        result = self._request("POST", "/api/Reports", json_body={"projectId": project_id})
-        # Response shape is documented as containing `id` or `reportId`.
-        if isinstance(result, dict):
-            return result.get("id") or result.get("reportId") or result.get("ReportId", "")
-        return str(result)
+    def list_project_files(self, project_id: str) -> List[Dict]:
+        """`GET /api/projects/{pid}/projectFiles`."""
+        result = self._request("GET",
+                               f"/api/projects/{project_id}/projectFiles")
+        return result if isinstance(result, list) else []
 
-    def run_report(self, report_id: str) -> Dict:
-        """`POST /api/Reports/:id/GenerateLink` — start the analysis."""
-        return self._request("POST", f"/api/Reports/{report_id}/GenerateLink")
+    # ── Tasks (the real QA driver) ──────────────────────────────────────────
 
-    def get_report_status(self, report_id: str) -> Dict:
-        """`GET /api/Reports/:id` — fetch status of every issueType."""
-        return self._request("GET", f"/api/Reports/{report_id}")
-
-    def wait_for_report(
+    def start_project(
         self,
-        report_id: str,
+        project_id: str,
+        assigned_to_id: str,
+        all_files: bool = True,
+    ) -> Dict:
+        """
+        `POST /api/Projects/{pid}/start` — what the UI's "Start QA" does.
+
+        Creates a task assigned to the given user covering all (or selected)
+        files. Required before /tasks/accept and /tasks/{id}/check.
+        """
+        body = {
+            "assignments": [
+                {"allFiles": all_files, "assignedToId": assigned_to_id}
+            ]
+        }
+        return self._request(
+            "POST", f"/api/Projects/{project_id}/start", json_body=body
+        )
+
+    def list_tasks(self, project_id: str) -> List[Dict]:
+        """`GET /api/projects/{pid}/tasks`."""
+        result = self._request("GET", f"/api/projects/{project_id}/tasks")
+        return result if isinstance(result, list) else []
+
+    def search_tasks(self, project_id: str, ids: List[str]) -> List[Dict]:
+        """`POST /api/projects/{pid}/tasks/search` body: {"ids":[...]}"""
+        result = self._request(
+            "POST", f"/api/projects/{project_id}/tasks/search",
+            json_body={"ids": list(ids)},
+        )
+        return result if isinstance(result, list) else []
+
+    def accept_tasks(self, project_id: str) -> None:
+        """`POST /api/projects/{pid}/tasks/accept` (no body)."""
+        self._request("POST", f"/api/projects/{project_id}/tasks/accept",
+                      json_body={})
+
+    def run_qa_check(self, project_id: str, task_id: str) -> None:
+        """
+        `POST /api/projects/{pid}/tasks/{tid}/check` (no body) — kicks off
+        the actual QA analysis on the task.
+        """
+        self._request(
+            "POST",
+            f"/api/projects/{project_id}/tasks/{task_id}/check",
+            json_body={},
+        )
+
+    def wait_for_task_completion(
+        self,
+        project_id: str,
+        task_id: str,
         poll_interval: int = DEFAULT_POLL_INTERVAL,
         timeout: int = DEFAULT_POLL_TIMEOUT,
         progress_cb: Optional[Callable[[Dict], None]] = None,
     ) -> Dict:
         """
-        Poll until every `issueType` has `status == 1` (ready) or timeout
-        is reached. Returns the final status dict.
+        Poll /api/projects/{pid}/tasks until our task reports completion.
 
-        progress_cb (if given) is called with the latest status payload
-        each tick — UI can show "3/6 categories ready" etc.
+        Heuristics for "done":
+            - status != 0          (0 == new/running)
+            - or leftCount == 0 AND task has been touched
+              (modifiedOn > createdOn)
+
+        Returns the final task dict.
         """
         deadline = time.time() + timeout
-        last_status: Dict = {}
+        last_task: Dict = {}
+        first_seen = None
+
         while time.time() < deadline:
-            status = self.get_report_status(report_id)
-            last_status = status
-            if progress_cb:
-                progress_cb(status)
-            statuses = self._extract_statuses(status)
-            if statuses and all(s.get("status") == 1 for s in statuses):
-                return status
+            tasks = self.list_tasks(project_id)
+            ours = [t for t in tasks if t.get("id") == task_id]
+            if ours:
+                t = ours[0]
+                last_task = t
+                if first_seen is None:
+                    first_seen = t.get("createdOn")
+                if progress_cb:
+                    progress_cb(t)
+
+                status = t.get("status", 0)
+                left = t.get("leftCount", 0)
+                modified = t.get("modifiedOn")
+                # Verifika sets status > 0 when QA finishes (1=ready,
+                # 2=accepted, etc). leftCount drops to 0 progressively.
+                if status and status != 0:
+                    return t
+                if (left == 0 and modified and first_seen
+                        and modified != first_seen):
+                    # Progress was made and now nothing left.
+                    return t
+
             time.sleep(poll_interval)
 
         raise VerifikaError(
-            f"Report {report_id} not ready after {timeout}s "
-            f"(last status: {last_status})"
+            f"Task {task_id} not finished after {timeout}s "
+            f"(last status: {last_task})"
         )
 
-    @staticmethod
-    def _extract_statuses(status_payload: Dict) -> List[Dict]:
-        """Pull the `statuses` array out of a /api/Reports/:id response."""
-        if not isinstance(status_payload, dict):
-            return []
-        if "statuses" in status_payload and isinstance(status_payload["statuses"], list):
-            return status_payload["statuses"]
-        # Some servers nest under "data" or "report"
-        for k in ("data", "report"):
-            inner = status_payload.get(k)
-            if isinstance(inner, dict) and isinstance(inner.get("statuses"), list):
-                return inner["statuses"]
-        return []
+    # ── Quality issues ──────────────────────────────────────────────────────
 
-    # ── Quality issues ─────────────────────────────────────────────────────
-
-    def get_quality_issues(self, project_id: str,
-                           report_id: Optional[str] = None) -> List[Dict]:
+    def get_quality_issues(
+        self,
+        project_id: str,
+        task_id: Optional[str] = None,
+    ) -> List[Dict]:
         """
-        `GET /api/QualityIssues` — fetch issues for a project (and
-        optionally a specific report).
-
-        Returns a flat list of issue dicts with at minimum:
-            { 'segmentId', 'issueType', 'severity', 'message',
-              'sourceText', 'targetText', 'suggestion' }
-        Field names are normalised across response shapes.
+        `GET /api/QualityIssues?projectId=...&taskId=...`
+        Returns a flat list of normalised issue dicts.
         """
         params: Dict = {"projectId": project_id}
-        if report_id:
-            params["reportId"] = report_id
-
+        if task_id:
+            params["taskId"] = task_id
         result = self._request("GET", "/api/QualityIssues", params=params)
+
         raw_list: List[Dict] = []
         if isinstance(result, list):
             raw_list = result
         elif isinstance(result, dict):
-            for key in ("value", "items", "results", "issues"):
-                if isinstance(result.get(key), list):
-                    raw_list = result[key]
-                    break
+            for k in ("value", "items", "results", "issues", "data"):
+                if isinstance(result.get(k), list):
+                    raw_list = result[k]; break
 
-        return [self._normalise_issue(it) for it in raw_list if isinstance(it, dict)]
+        return [self._normalise_issue(it) for it in raw_list
+                if isinstance(it, dict)]
+
+    def search_quality_issues(
+        self,
+        project_id: str,
+        issue_ids: List[str],
+    ) -> List[Dict]:
+        """
+        `POST /api/projects/{pid}/qualityIssues/search`
+        body: ["issueId1", "issueId2"] (raw JSON array — string IDs)
+        """
+        result = self._request(
+            "POST",
+            f"/api/projects/{project_id}/qualityIssues/search",
+            json_body=list(issue_ids),
+        )
+        if isinstance(result, list):
+            return [self._normalise_issue(it) for it in result
+                    if isinstance(it, dict)]
+        return []
 
     @staticmethod
     def _normalise_issue(it: Dict) -> Dict:
-        """
-        Normalise a single issue dict to a stable schema regardless of
-        the field-name flavour the server returns (camelCase vs PascalCase).
-        """
+        """Stable schema irrespective of camelCase/PascalCase server."""
         def pick(*keys, default=""):
             for k in keys:
                 if k in it and it[k] not in (None, ""):
                     return it[k]
             return default
 
-        issue_type = pick("issueType", "IssueType", "type", default=-1)
         try:
-            issue_type_int = int(issue_type)
+            issue_type_int = int(pick("issueType", "IssueType", "type",
+                                      default=-1))
         except (TypeError, ValueError):
             issue_type_int = -1
 
         return {
-            "id":           pick("id", "Id", default=""),
-            "segmentId":    pick("segmentId", "SegmentId", "segId", default=""),
-            "issueType":    issue_type_int,
-            "issueLabel":   ISSUE_TYPE_LABELS.get(issue_type_int, f"Type {issue_type_int}"),
-            "severity":     pick("severity", "Severity", default="warning"),
-            "message":      pick("message", "Message", "description", "Description", default=""),
-            "sourceText":   pick("sourceText", "SourceText", "source", "Source", default=""),
-            "targetText":   pick("targetText", "TargetText", "target", "Target", default=""),
-            "suggestion":   pick("suggestion", "Suggestion", default=""),
-            "raw":          it,
+            "id":         pick("id", "Id"),
+            "segmentId":  pick("segmentId", "SegmentId", "segId"),
+            "issueType":  issue_type_int,
+            "issueLabel": ISSUE_TYPE_LABELS.get(
+                issue_type_int, f"Type {issue_type_int}"),
+            "severity":   pick("severity", "Severity", default="warning"),
+            "message":    pick("message", "Message",
+                               "description", "Description"),
+            "sourceText": pick("sourceText", "SourceText",
+                               "source", "Source"),
+            "targetText": pick("targetText", "TargetText",
+                               "target", "Target"),
+            "suggestion": pick("suggestion", "Suggestion"),
+            "raw":        it,
         }
 
     # ── High-level convenience: end-to-end QA ──────────────────────────────
@@ -570,63 +631,85 @@ class VerifikaQAClient:
         xliff_bytes: bytes,
         xliff_filename: str,
         qa_settings_id: str,
-        source_lang: Optional[str] = None,
-        target_lang: Optional[str] = None,
+        assigned_to_id: Optional[str] = None,
         progress_cb: Optional[Callable[[str, Dict], None]] = None,
-    ) -> Tuple[str, List[Dict]]:
+    ) -> Tuple[str, str, List[Dict]]:
         """
-        One-shot: create project → upload file → assign profile →
-        generate report → wait → return issues.
+        Full Verifika QA chain matching the UI's behaviour:
 
-        Args:
-            project_name:    Display name (e.g. XLIFF basename + timestamp).
-            xliff_bytes:     Translated XLIFF content.
-            xliff_filename:  File name to register on Verifika side.
-            qa_settings_id:  Profile uuid (from list_qa_settings).
-            source_lang:     Optional source language hint.
-            target_lang:     Optional target language hint.
-            progress_cb:     Optional callable(stage, payload) for UI progress.
-                             stages: 'project_created', 'file_uploaded',
-                                     'profile_assigned', 'report_started',
-                                     'report_progress', 'issues_fetched'.
+            create_project(qaSettingsId)
+              → upload_file (chunks + commit)
+              → start_project (creates+assigns task)
+              → list_tasks (read taskId)
+              → accept_tasks
+              → run_qa_check
+              → wait_for_task_completion
+              → get_quality_issues
 
-        Returns:
-            (project_id, [normalised issue dicts])
+        Returns (project_id, task_id, [issue dicts]).
+
+        If `assigned_to_id` is None, we resolve the current user's GUID
+        from the JWT token (or /api/Users/current as fallback).
         """
-        def _emit(stage, payload):
+        def _emit(stage: str, payload: Dict):
             if progress_cb:
                 try: progress_cb(stage, payload)
                 except Exception: pass
 
-        # 1. Project
-        project = self.create_project(project_name, source_lang, target_lang)
+        # 1. Create project (with QA profile baked in)
+        project = self.create_project(project_name, qa_settings_id=qa_settings_id)
         project_id = project.get("id") or project.get("Id") or ""
         if not project_id:
-            raise VerifikaError(f"Project create response missing id: {project}")
+            raise VerifikaError(f"Project create returned no id: {project}")
         _emit("project_created", project)
 
-        # 2. Upload
-        commit = self.upload_file(project_id, xliff_bytes, xliff_filename)
-        _emit("file_uploaded", commit)
+        # 2. Upload file
+        upload = self.upload_file(project_id, xliff_bytes, xliff_filename)
+        _emit("file_uploaded", upload)
 
-        # 3. QA profile
-        self.assign_qa_profile(project_id, qa_settings_id)
-        _emit("profile_assigned", {"qaSettingsId": qa_settings_id})
+        # 3. Resolve user GUID for assignment
+        user_id = assigned_to_id or self.get_current_user_id()
 
-        # 4. Report
-        report_id = self.create_report(project_id)
-        if not report_id:
-            raise VerifikaError("Report create returned empty id")
-        self.run_report(report_id)
-        _emit("report_started", {"reportId": report_id})
+        # 4. Start project (creates task, assigns it, "Start QA" equivalent)
+        start_resp = self.start_project(project_id, assigned_to_id=user_id)
+        _emit("project_started", start_resp)
 
-        # 5. Poll
-        final_status = self.wait_for_report(
-            report_id,
-            progress_cb=lambda s: _emit("report_progress", s),
+        # 5. Read created task id
+        tasks = self.list_tasks(project_id)
+        if not tasks:
+            raise VerifikaError(
+                "No tasks visible after /start — server did not create one?"
+            )
+        task = tasks[0]
+        task_id = task.get("id") or task.get("Id") or ""
+        if not task_id:
+            raise VerifikaError(f"Task missing id: {task}")
+        _emit("task_ready", task)
+
+        # 6. Accept tasks
+        self.accept_tasks(project_id)
+        _emit("tasks_accepted", {"projectId": project_id})
+
+        # 7. Run QA check on the task
+        self.run_qa_check(project_id, task_id)
+        _emit("qa_check_started", {"taskId": task_id})
+
+        # 8. Poll until complete
+        final_task = self.wait_for_task_completion(
+            project_id, task_id,
+            progress_cb=lambda t: _emit("qa_progress", t),
         )
+        _emit("qa_completed", final_task)
 
-        # 6. Issues
-        issues = self.get_quality_issues(project_id, report_id)
-        _emit("issues_fetched", {"count": len(issues), "status": final_status})
-        return project_id, issues
+        # 9. Fetch issues
+        issues = self.get_quality_issues(project_id, task_id)
+        _emit("issues_fetched", {"count": len(issues)})
+
+        return project_id, task_id, issues
+
+    # ── Convenience: review URL for the rich UI ────────────────────────────
+
+    def report_url(self, project_id: str) -> str:
+        """The web UI's QA review screen — embeddable in an iframe or
+        opened in a new tab."""
+        return f"{self.base_url}/report/{project_id}/formal"
