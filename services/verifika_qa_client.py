@@ -427,7 +427,7 @@ class VerifikaQAClient:
                 "ProjectId":   project_id,
                 "FileName":    file_name,
                 "FileId":      file_id,
-                "Indices":     uploaded_indices,
+                "Indices":     ",".join(str(i) for i in uploaded_indices),
                 "TotalSize":   total,
                 "TotalChunks": chunk_idx,
             },
