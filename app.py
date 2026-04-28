@@ -131,7 +131,21 @@ with st.sidebar:
     
     # AI Settings
     st.subheader("🤖 AI Settings")
-    api_key = st.text_input("API Key", type="password")
+    # Pre-fill from Streamlit secrets if configured.
+    # Secrets format (in .streamlit/secrets.toml or Streamlit Cloud secrets):
+    #     openai_api_key = "sk-..."
+    _default_api_key = ""
+    try:
+        if hasattr(st, "secrets") and "openai_api_key" in st.secrets:
+            _default_api_key = st.secrets["openai_api_key"]
+    except Exception:
+        pass
+    api_key = st.text_input(
+        "API Key",
+        type="password",
+        value=_default_api_key,
+        help="Pre-filled from Streamlit secrets if `openai_api_key` is set; otherwise paste here.",
+    )
     model = st.selectbox("Model", config.OPENAI_MODELS)
     
     st.divider()
