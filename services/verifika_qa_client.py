@@ -525,47 +525,61 @@ class VerifikaQAClient:
 
     # ── Quality issues ──────────────────────────────────────────────────────
 
-    def get_quality_issues_payload(self, report_id: str) -> Dict:
+    def get_quality_issues_payload(self, project_id: str) -> Dict:
         """
-        Raw `GET /api/QualityIssues?reportId=X` response. Shape:
+        Raw `GET /api/QualityIssues?projectId=X` response. Shape:
             {
               "qualityIssues": [...],
               "statuses": [{"issueType":N, "status":0|1}, ...]
             }
+
+        IMPORTANT: We query with projectId, NOT reportId. The server
+        side runs the actual QA against an automatically-created
+        report whose id we cannot retrieve via POST /api/Reports
+        (that endpoint creates a separate placeholder report that
+        always stays empty). projectId is the only reliable key —
+        verified live: the same response that comes back to the Web
+        UI is what we get here.
+
+        Each issue in the response carries its own `reportId` field
+        (the *real* report id), which is what we use for downstream
+        actions like update_translation_units and ignore_issues.
         """
         result = self._request(
             "GET", "/api/QualityIssues",
-            params={"reportId": report_id},
+            params={"projectId": project_id},
         )
         if isinstance(result, dict):
             return result
         return {"qualityIssues": [], "statuses": []}
 
-    def get_quality_issues(self, report_id: str) -> List[Dict]:
+    def get_quality_issues(self, project_id: str) -> List[Dict]:
         """Normalised flat list of issue dicts."""
-        payload = self.get_quality_issues_payload(report_id)
+        payload = self.get_quality_issues_payload(project_id)
         raw = payload.get("qualityIssues") or []
         return [self._normalise_issue(it) for it in raw if isinstance(it, dict)]
 
     def wait_for_qa_completion(
         self,
-        report_id: str,
+        project_id: str,
         poll_interval: int = DEFAULT_POLL_INTERVAL,
         timeout: int = DEFAULT_POLL_TIMEOUT,
         progress_cb: Optional[Callable[[Dict], None]] = None,
     ) -> Dict:
         """
-        Poll /api/QualityIssues?reportId=X until every category's
+        Poll /api/QualityIssues?projectId=X until every category's
         status == 1. Returns the final payload.
 
-        progress_cb is invoked with the latest payload each tick so the
-        UI can show partial progress (which categories are done).
+        Note: we key on projectId, not reportId, because the report
+        the server runs the QA against is internally managed and not
+        the same object as the one our POST /api/Reports returns.
+        See get_quality_issues_payload for the full story.
         """
         deadline = time.time() + timeout
         last: Dict = {}
         while time.time() < deadline:
             try:
-                payload = self.get_quality_issues_payload(report_id)
+                payload = self.get_quality_issues_payload(project_id)
             except VerifikaError as e:
                 logger.warning("Polling fetch failed: %s", e)
                 time.sleep(poll_interval)
@@ -586,7 +600,7 @@ class VerifikaQAClient:
             time.sleep(poll_interval)
 
         raise VerifikaError(
-            f"QA report {report_id} not ready after {timeout}s "
+            f"QA for project {project_id} not ready after {timeout}s "
             f"(last statuses: {last.get('statuses')})"
         )
 
@@ -691,7 +705,12 @@ class VerifikaQAClient:
 
     def ignore_issues(self, report_id: str,
                       issue_ids: List[str], ignored: bool = True) -> None:
-        """`POST /api/QualityIssues/Ignore`."""
+        """`POST /api/QualityIssues/Ignore`.
+
+        report_id MUST be the real report id — pulled from any quality
+        issue's `reportId` field. The id returned by POST /api/Reports
+        is a placeholder and will produce 4301 'Report not found'.
+        """
         if not issue_ids:
             return
         self._request(
@@ -788,20 +807,32 @@ class VerifikaQAClient:
             except VerifikaError as e:
                 logger.warning("Reports/Generate failed: %s", e)
 
-        # 8. Poll
+        # 8. Poll — keyed on projectId (NOT reportId, because the
+        #    server's internal report is not the one our POST /api/Reports
+        #    returned; projectId is the only reliable key).
         final_payload = self.wait_for_qa_completion(
-            report_id,
+            project_id,
             progress_cb=lambda p: _emit("qa_progress", p),
         )
         _emit("qa_completed", final_payload)
 
-        # 9. Fetch normalised issues
+        # 9. Normalise issues. Each issue carries its own `reportId`
+        #    (the *real* internal report id) — we surface that so the
+        #    caller can use it for update_translation_units / ignore.
         raw_issues = final_payload.get("qualityIssues") or []
         issues = [self._normalise_issue(it) for it in raw_issues
                   if isinstance(it, dict)]
         _emit("issues_fetched", {"count": len(issues)})
 
-        return project_id, report_id, issues
+        # Pull the real report id from the first issue if available;
+        # fall back to the placeholder we created earlier.
+        real_report_id = report_id
+        for it in raw_issues:
+            if isinstance(it, dict) and it.get("reportId"):
+                real_report_id = it["reportId"]
+                break
+
+        return project_id, real_report_id, issues
 
     # ── Convenience: review URL for the rich UI ────────────────────────────
 
