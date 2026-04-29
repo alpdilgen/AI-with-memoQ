@@ -1,12 +1,12 @@
 """
-Verifika QA Tab — Streamlit UI (v2, task-based workflow).
+Verifika QA Tab — Streamlit UI (v3, report-based workflow).
 
-Drives the real Verifika web UI flow:
-    Create project (with qaSettingsId) → upload XLIFF → start_project
-    → tasks/accept → tasks/{id}/check → poll tasks → fetch issues
-
-Plus offers the rich Verifika report screen via iframe and a "Open in
-new tab" link as fallback for when 3rd-party cookies block the iframe.
+Drives the v3 VerifikaQAClient:
+    create_project → upload → create_report → run_report
+    → poll /api/QualityIssues?reportId=... (statuses[] array)
+    → fetch issues
+    → Apply Corrections (locally + back to Verifika via
+       /api/QualityIssues/updateTranslationUnits)
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from services.verifika_qa_client import (
     VerifikaQAClient,
     VerifikaError,
     DEFAULT_BASE_URL,
+    ISSUE_TYPE_LABELS,
 )
 from utils.xml_parser import XMLParser
 
@@ -34,15 +35,14 @@ def _init_session_state():
         "verifika_client":            None,
         "verifika_qa_profiles":       [],
         "verifika_qa_profile_id":     None,
-        "verifika_user_id":           None,
         "verifika_project_id":        None,
-        "verifika_task_id":           None,
-        "verifika_report_url":        None,
+        "verifika_report_id":         None,
         "verifika_issues":            [],
         "verifika_run_status":        "idle",   # idle/running/done/error
         "verifika_last_error":        "",
         "verifika_progress_messages": [],
         "verifika_corrected_xliff":   None,
+        "verifika_last_statuses":     [],
     }
     for k, v in defaults.items():
         if k not in st.session_state:
@@ -119,13 +119,12 @@ def _severity_icon(sev: str) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def show_verifika_tab():
-    """Render the Verifika QA tab. Idempotent — safe to re-run."""
     _init_session_state()
 
     st.subheader("✅ Verifika Cloud QA")
     st.markdown(
-        "Run cloud-based quality checks against the translated XLIFF "
-        "via the Verifika QA API."
+        "Cloud-based quality checks against the translated XLIFF via the "
+        "Verifika QA API."
     )
 
     if not st.session_state.get("translation_results"):
@@ -135,7 +134,7 @@ def show_verifika_tab():
     client = _get_or_create_client()
     if client is None:
         st.markdown(
-            "**Setup:** Add to `.streamlit/secrets.toml` (or Streamlit Cloud secrets):\n"
+            "**Setup:** Add to `.streamlit/secrets.toml`:\n"
             "```toml\nverifika_api_token = \"<your-token>\"\n```"
         )
         return
@@ -201,14 +200,15 @@ def show_verifika_tab():
     if run_clicked:
         _run_qa_workflow(client, chosen_id)
 
-    # ── 3. Report viewer + issue table ────────────────────────────────────
+    # ── 3. Report viewer ──────────────────────────────────────────────────
     if st.session_state.verifika_project_id and st.session_state.verifika_run_status == "done":
         _render_report_section(client)
 
+    # ── 4. Issue table ────────────────────────────────────────────────────
     if st.session_state.verifika_issues:
         st.markdown("##### 4. Issues (editable)")
         _render_issue_table(st.session_state.verifika_issues)
-        _render_apply_corrections()
+        _render_apply_corrections(client)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -216,12 +216,12 @@ def show_verifika_tab():
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _run_qa_workflow(client: VerifikaQAClient, qa_settings_id: str):
-    """End-to-end Verifika run with UI progress feedback."""
     st.session_state.verifika_run_status = "running"
     st.session_state.verifika_progress_messages = []
     st.session_state.verifika_issues = []
     st.session_state.verifika_last_error = ""
     st.session_state.verifika_corrected_xliff = None
+    st.session_state.verifika_last_statuses = []
 
     xliff_bytes    = st.session_state.get("last_xliff_bytes")
     xliff_filename = st.session_state.get("last_xliff_filename") or "translated.xliff"
@@ -256,35 +256,46 @@ def _run_qa_workflow(client: VerifikaQAClient, qa_settings_id: str):
     msgs: List[str] = []
 
     label_map = {
-        "project_created":    "📁 Project created",
-        "file_uploaded":      "⬆️ File uploaded",
-        "project_started":    "🚀 Project started (task created & assigned)",
-        "task_ready":         "📋 Task ready",
-        "tasks_accepted":     "✅ Task accepted",
-        "qa_check_started":   "🔍 QA check started",
-        "qa_progress":        "⏳ QA progress…",
-        "qa_completed":       "🎯 QA completed",
-        "issues_fetched":     "📥 Issues fetched",
+        "project_created":  "📁 Project created",
+        "file_uploaded":    "⬆️ File uploaded",
+        "report_created":   "📋 Report created",
+        "report_started":   "🚀 QA analysis started",
+        "qa_completed":     "🎯 QA analysis completed",
+        "issues_fetched":   "📥 Issues fetched",
     }
 
     def _ui_progress(stage: str, payload: Dict):
         if stage == "qa_progress":
-            left = payload.get("leftCount", "?")
-            corr = payload.get("correctedCount", "?")
-            ign  = payload.get("ignoredCount", "?")
-            status = payload.get("status", "?")
-            acc = payload.get("acceptanceStatus", "?")
-            msg = (f"⏳ Polling… status={status}, accept={acc}, "
-                   f"left={left}, corrected={corr}, ignored={ign}")
+            statuses = payload.get("statuses") or []
+            st.session_state.verifika_last_statuses = statuses
+            done = sum(1 for s in statuses if int(s.get("status", 0) or 0) == 1)
+            total = len(statuses)
+            issues_so_far = len(payload.get("qualityIssues") or [])
+            # Build per-category breakdown
+            cats = []
+            for s in statuses:
+                t = s.get("issueType")
+                done_one = int(s.get("status", 0) or 0) == 1
+                label = ISSUE_TYPE_LABELS.get(t, f"T{t}")
+                cats.append(f"{'✓' if done_one else '⏳'} {label}")
+            cat_str = " · ".join(cats)
+            msg = (f"⏳ Polling… {done}/{total} categories ready, "
+                   f"{issues_so_far} issue(s) found so far\n  {cat_str}")
         elif stage == "issues_fetched":
             msg = f"📥 {payload.get('count', 0)} issue(s) fetched"
+        elif stage == "qa_completed":
+            statuses = payload.get("statuses") or []
+            issues = payload.get("qualityIssues") or []
+            msg = (f"🎯 QA completed — "
+                   f"{len(statuses)} categories all ready, "
+                   f"{len(issues)} issue(s)")
         else:
             msg = label_map.get(stage, stage)
         msgs.append(msg)
         progress_box.markdown("\n".join(f"- {m}" for m in msgs[-12:]))
 
     try:
-        project_id, task_id, issues = client.run_full_qa(
+        project_id, report_id, issues = client.run_full_qa(
             project_name=project_name,
             xliff_bytes=translated_xml,
             xliff_filename=xliff_filename,
@@ -292,9 +303,8 @@ def _run_qa_workflow(client: VerifikaQAClient, qa_settings_id: str):
             progress_cb=_ui_progress,
         )
         st.session_state.verifika_project_id = project_id
-        st.session_state.verifika_task_id    = task_id
+        st.session_state.verifika_report_id  = report_id
         st.session_state.verifika_issues     = issues
-        st.session_state.verifika_report_url = client.report_url(project_id)
         st.session_state.verifika_run_status = "done"
         if issues:
             st.success(f"Found {len(issues)} issue(s).")
@@ -315,28 +325,32 @@ def _run_qa_workflow(client: VerifikaQAClient, qa_settings_id: str):
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Report viewer (iframe + open-in-new-tab)
+# Report viewer (link + iframe attempt)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _render_report_section(client: VerifikaQAClient):
     st.markdown("##### 3. Verifika Report")
-    url = st.session_state.verifika_report_url
+    project_id = st.session_state.verifika_project_id
+    url = client.report_url(project_id)
 
     cols = st.columns([2, 2, 1])
     with cols[0]:
         st.markdown(
             f"🔗 [Open in Verifika (new tab)]({url})",
-            help="Opens the Verifika web UI's review screen in a new browser tab. "
-                 "Uses your existing Verifika login session.",
+            help="Opens Verifika's review screen in a new tab. "
+                 "Requires you to be logged into Verifika in the same browser."
         )
     with cols[1]:
         show_iframe = st.toggle(
-            "Show Verifika report inline (iframe)",
+            "Try inline iframe (often fails — see notes)",
             value=False,
             key="verifika_iframe_toggle",
-            help="Embeds the Verifika report directly in this page. "
-                 "Only works if your browser allows 3rd-party cookies for "
-                 "beta.e-verifika.com (Streamlit Cloud may block them).",
+            help=(
+                "Verifika's auth provider blocks iframe embedding "
+                "(X-Frame-Options on auth.e-verifika.com). The iframe "
+                "will likely show an error. The 'Open in new tab' link "
+                "is the reliable option."
+            ),
         )
 
     if show_iframe:
@@ -348,7 +362,6 @@ def _render_report_section(client: VerifikaQAClient):
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _render_issue_table(issues: List[Dict]):
-    """Editable Streamlit table of Verifika issues."""
     if not issues:
         return
 
@@ -361,16 +374,12 @@ def _render_issue_table(issues: List[Dict]):
             default=type_options,
         )
     with f2:
-        sev_options = sorted({(i["severity"] or "").lower() for i in issues})
-        selected_sevs = st.multiselect(
-            "Filter by severity", options=sev_options,
-            default=sev_options,
-        )
+        show_ignored = st.checkbox("Show ignored issues", value=False)
 
     filtered = [
         i for i in issues
         if i["issueLabel"] in selected_types
-        and (i["severity"] or "").lower() in selected_sevs
+        and (show_ignored or not i.get("isIgnored"))
     ]
 
     st.caption(
@@ -381,7 +390,7 @@ def _render_issue_table(issues: List[Dict]):
     header_cols = st.columns([1, 2, 2, 4, 4, 3])
     for col, hdr in zip(header_cols,
                         ["", "Type", "Seg", "Source",
-                         "Target (editable)", "Suggestion"]):
+                         "Target (editable)", "Detail"]):
         col.markdown(f"**{hdr}**")
     st.markdown("---")
 
@@ -395,9 +404,11 @@ def _render_issue_table(issues: List[Dict]):
         cols[3].write(src[:120] + ("…" if len(src) > 120 else ""))
 
         edit_key = f"verifika_edit_{iss['id'] or idx}_{iss['segmentId']}"
+        # Prefer the current Streamlit translation; fall back to Verifika's view
         current = (
             st.session_state.translation_results.get(iss["segmentId"])
-            if iss["segmentId"] else iss["targetText"]
+            if iss["segmentId"]
+            else iss["targetText"]
         )
         cols[4].text_input(
             "target",
@@ -406,17 +417,31 @@ def _render_issue_table(issues: List[Dict]):
             label_visibility="collapsed",
         )
 
-        sug = iss["suggestion"] or iss["message"] or ""
-        cols[5].caption(sug[:200] + ("…" if len(sug) > 200 else ""))
+        # Detail column — issueKind text + ignored flag if present
+        bits = []
+        if iss.get("issueKind"):
+            bits.append(str(iss["issueKind"]))
+        if iss.get("isIgnored"):
+            bits.append("🚫 ignored")
+        cols[5].caption(" · ".join(bits) if bits else "—")
 
 
-def _render_apply_corrections():
+def _render_apply_corrections(client: VerifikaQAClient):
     st.markdown("---")
     apply_col, dl_col = st.columns([1, 3])
+
+    sync_to_verifika = st.checkbox(
+        "Also push corrections to Verifika "
+        "(POST /api/QualityIssues/updateTranslationUnits)",
+        value=True,
+        help="When checked, the same corrections will be sent to Verifika "
+             "so the report tracks the changes.",
+    )
+
     with apply_col:
         if st.button("✅ Apply Corrections",
                      type="primary", use_container_width=True):
-            _apply_corrections()
+            _apply_corrections(client, sync_to_verifika)
 
     if st.session_state.verifika_corrected_xliff:
         with dl_col:
@@ -432,25 +457,46 @@ def _render_apply_corrections():
             )
 
 
-def _apply_corrections():
+def _apply_corrections(client: VerifikaQAClient, sync_to_verifika: bool):
     issues = st.session_state.verifika_issues
     translations = st.session_state.translation_results
     applied = 0
+    verifika_updates: List[Dict] = []
 
     for idx, iss in enumerate(issues):
         edit_key = f"verifika_edit_{iss['id'] or idx}_{iss['segmentId']}"
         new_val = st.session_state.get(edit_key, "")
         if not iss["segmentId"]:
             continue
-        if new_val and new_val.strip() != (translations.get(iss["segmentId"]) or "").strip():
+        old_val = (translations.get(iss["segmentId"]) or "").strip()
+        if new_val and new_val.strip() != old_val:
             translations[iss["segmentId"]] = new_val
             applied += 1
+            tu_id = iss.get("translationUnitId")
+            if sync_to_verifika and tu_id:
+                verifika_updates.append({
+                    "id": tu_id,
+                    "text": new_val,
+                    "originalText": iss.get("originalTarget") or iss.get("targetText"),
+                })
 
     if not applied:
         st.info("No changes detected. Edit a target cell before applying.")
         return
 
     st.session_state.translation_results = translations
+
+    # Push to Verifika (best-effort; failure here doesn't block local download)
+    if sync_to_verifika and verifika_updates and st.session_state.verifika_report_id:
+        try:
+            client.update_translation_units(
+                st.session_state.verifika_report_id, verifika_updates
+            )
+            st.success(f"📤 Pushed {len(verifika_updates)} correction(s) to Verifika.")
+        except VerifikaError as e:
+            st.warning(f"Local apply succeeded but Verifika sync failed: {e}")
+
+    # Rebuild XLIFF for local download
     seg_objs       = st.session_state.get("segment_objects", {})
     match_scores   = st.session_state.get("segment_match_scores", {})
     xliff_bytes    = st.session_state.get("last_xliff_bytes")
