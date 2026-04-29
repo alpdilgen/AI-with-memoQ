@@ -344,6 +344,59 @@ class VerifikaQAClient:
         )
         return result if isinstance(result, list) else []
 
+
+    # ── Task chain (the real QA trigger) ───────────────────────────────────
+
+    def start_project(
+        self,
+        project_id: str,
+        assigned_to_id: Optional[str] = None,
+        all_files: bool = True,
+    ) -> Dict:
+        """
+        `POST /api/Projects/{pid}/start` — what the Web UI's "Start QA"
+        button calls. Creates a task assigned to the given user.
+
+        This is the entry point that wires the report's QA pipeline to
+        an executable task. Without this call, /tasks/{id}/check has no
+        task to act on, and the QualityIssues statuses stay at 0.
+        """
+        uid = assigned_to_id or self.get_current_user_id()
+        body = {
+            "assignments": [
+                {"allFiles": all_files, "assignedToId": uid}
+            ]
+        }
+        return self._request(
+            "POST", f"/api/Projects/{project_id}/start", json_body=body
+        )
+
+    def list_tasks(self, project_id: str) -> List[Dict]:
+        result = self._request("GET", f"/api/projects/{project_id}/tasks")
+        return result if isinstance(result, list) else []
+
+    def accept_tasks(self, project_id: str) -> None:
+        """`POST /api/projects/{pid}/tasks/accept` (no body)."""
+        self._request(
+            "POST", f"/api/projects/{project_id}/tasks/accept",
+            json_body={}, accept_status={200, 202, 204},
+        )
+
+    def check_task(self, project_id: str, task_id: str) -> None:
+        """
+        `POST /api/projects/{pid}/tasks/{tid}/check` (no body).
+
+        ⭐ This is the call that actually starts the QA analysis on
+        the server. /api/Reports/{id}/Generate alone returns 202 but
+        does not move the statuses; only after /tasks/{tid}/check
+        does the server start producing issues and flipping statuses
+        to 1.
+        """
+        self._request(
+            "POST", f"/api/projects/{project_id}/tasks/{task_id}/check",
+            json_body={}, accept_status={200, 202, 204},
+        )
+
     # ── File upload ─────────────────────────────────────────────────────────
 
     def upload_file(
@@ -685,22 +738,64 @@ class VerifikaQAClient:
         upload = self.upload_file(project_id, xliff_bytes, xliff_filename)
         _emit("file_uploaded", upload)
 
-        # 3. Report
+        # 3. Start project (creates a task and assigns it to current user).
+        # This is what the Web UI's "Start QA" button calls.
+        try:
+            self.start_project(project_id)
+            _emit("project_started", {"projectId": project_id})
+        except VerifikaError as e:
+            logger.warning("start_project failed (continuing anyway): %s", e)
+
+        # 4. Read the task id the server just created
+        task_id: Optional[str] = None
+        try:
+            tasks = self.list_tasks(project_id)
+            if tasks:
+                task_id = tasks[0].get("id") or tasks[0].get("Id")
+                _emit("task_ready", tasks[0])
+        except VerifikaError as e:
+            logger.warning("list_tasks failed: %s", e)
+
+        # 5. Accept the task(s). No-op if already accepted.
+        try:
+            self.accept_tasks(project_id)
+            _emit("tasks_accepted", {"projectId": project_id})
+        except VerifikaError as e:
+            logger.warning("accept_tasks failed: %s", e)
+
+        # 6. Report (idempotent — created automatically by /start, but
+        #    we still need its id for QualityIssues queries)
         report_id = self.create_report(project_id)
         _emit("report_created", {"reportId": report_id})
 
-        # 4. Run (kicks off QA)
-        self.run_report(report_id)
-        _emit("report_started", {"reportId": report_id})
+        # 7. ⭐ Trigger the actual QA analysis. The Reports/Generate
+        #    endpoint alone is not enough; tasks/{id}/check is what
+        #    makes the server start computing issues.
+        triggered = False
+        if task_id:
+            try:
+                self.check_task(project_id, task_id)
+                _emit("qa_check_triggered", {"taskId": task_id})
+                triggered = True
+            except VerifikaError as e:
+                logger.warning("tasks/{id}/check failed: %s", e)
 
-        # 5. Poll
+        # Fall back to Reports/Generate if check_task wasn't possible
+        if not triggered:
+            try:
+                self.run_report(report_id)
+                _emit("report_started", {"reportId": report_id})
+            except VerifikaError as e:
+                logger.warning("Reports/Generate failed: %s", e)
+
+        # 8. Poll
         final_payload = self.wait_for_qa_completion(
             report_id,
             progress_cb=lambda p: _emit("qa_progress", p),
         )
         _emit("qa_completed", final_payload)
 
-        # 6. Fetch normalised issues
+        # 9. Fetch normalised issues
         raw_issues = final_payload.get("qualityIssues") or []
         issues = [self._normalise_issue(it) for it in raw_issues
                   if isinstance(it, dict)]

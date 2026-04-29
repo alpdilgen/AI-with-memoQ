@@ -256,12 +256,16 @@ def _run_qa_workflow(client: VerifikaQAClient, qa_settings_id: str):
     msgs: List[str] = []
 
     label_map = {
-        "project_created":  "📁 Project created",
-        "file_uploaded":    "⬆️ File uploaded",
-        "report_created":   "📋 Report created",
-        "report_started":   "🚀 QA analysis started",
-        "qa_completed":     "🎯 QA analysis completed",
-        "issues_fetched":   "📥 Issues fetched",
+        "project_created":      "📁 Project created",
+        "file_uploaded":        "⬆️ File uploaded",
+        "project_started":      "🟢 Project started (task created)",
+        "task_ready":           "📋 Task ready",
+        "tasks_accepted":       "✅ Task accepted",
+        "report_created":       "📊 Report created",
+        "qa_check_triggered":   "⭐ QA check triggered",
+        "report_started":       "🚀 QA analysis started (fallback)",
+        "qa_completed":         "🎯 QA analysis completed",
+        "issues_fetched":       "📥 Issues fetched",
     }
 
     def _ui_progress(stage: str, payload: Dict):
