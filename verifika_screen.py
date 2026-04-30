@@ -738,15 +738,17 @@ def _apply_corrections(client: VerifikaQAClient, sync_to_verifika: bool):
             st.warning(f"Local apply succeeded but Verifika sync failed: {e}")
 
     # ── Push ignore-state changes to Verifika (best-effort) ──────────────
-    if sync_to_verifika and st.session_state.verifika_report_id and (ignore_now or unignore_now):
+    # ignore_issues uses project-scoped path /api/projects/{pid}/qualityIssues/ignore,
+    # so pass verifika_project_id (NOT verifika_report_id).
+    if sync_to_verifika and st.session_state.verifika_project_id and (ignore_now or unignore_now):
         try:
             if ignore_now:
                 client.ignore_issues(
-                    st.session_state.verifika_report_id, ignore_now, ignored=True
+                    st.session_state.verifika_project_id, ignore_now, ignored=True
                 )
             if unignore_now:
                 client.ignore_issues(
-                    st.session_state.verifika_report_id, unignore_now, ignored=False
+                    st.session_state.verifika_project_id, unignore_now, ignored=False
                 )
             id_to_ignored = {i: True for i in ignore_now}
             id_to_ignored.update({i: False for i in unignore_now})
