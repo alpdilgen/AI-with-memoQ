@@ -270,19 +270,29 @@ def _run_qa_workflow(client: VerifikaQAClient, qa_settings_id: str):
 
     def _ui_progress(stage: str, payload: Dict):
         if stage == "qa_progress":
-            # payload is a task dict from /api/projects/{pid}/tasks
-            status = int(payload.get("status", 0) or 0)
-            left = payload.get("leftCount", "?")
-            done = payload.get("doneCount", "?")
-            modified = payload.get("modifiedOn", "")
-            state = "✓ done" if status and status != 0 else "⏳ running"
-            msg = (f"{state} — leftCount={left}, doneCount={done}"
-                   + (f", lastUpdate={modified}" if modified else ""))
+            statuses = payload.get("statuses") or []
+            st.session_state.verifika_last_statuses = statuses
+            done = sum(1 for s in statuses if int(s.get("status", 0) or 0) == 1)
+            total = len(statuses)
+            issues_so_far = len(payload.get("qualityIssues") or [])
+            # Build per-category breakdown
+            cats = []
+            for s in statuses:
+                t = s.get("issueType")
+                done_one = int(s.get("status", 0) or 0) == 1
+                label = ISSUE_TYPE_LABELS.get(t, f"T{t}")
+                cats.append(f"{'✓' if done_one else '⏳'} {label}")
+            cat_str = " · ".join(cats)
+            msg = (f"⏳ Polling… {done}/{total} categories ready, "
+                   f"{issues_so_far} issue(s) found so far\n  {cat_str}")
         elif stage == "issues_fetched":
             msg = f"📥 {payload.get('count', 0)} issue(s) fetched"
         elif stage == "qa_completed":
-            status = int(payload.get("status", 0) or 0)
-            msg = f"🎯 QA completed — task status={status}"
+            statuses = payload.get("statuses") or []
+            issues = payload.get("qualityIssues") or []
+            msg = (f"🎯 QA completed — "
+                   f"{len(statuses)} categories all ready, "
+                   f"{len(issues)} issue(s)")
         else:
             msg = label_map.get(stage, stage)
         msgs.append(msg)
@@ -490,13 +500,13 @@ def _render_issue_table(issues: List[Dict]):
             unsafe_allow_html=True,
         )
 
+        # Resolve the value to display in the editable input.
+        # Priority: override (just-applied fix) > current translation > Verifika target.
         current = (
             st.session_state.translation_results.get(iss["segmentId"])
             if iss["segmentId"]
             else iss["targetText"]
         )
-        # Resolve the value to display in the editable input.
-        # Priority: override (just-applied fix) > current translation > Verifika target.
         default_value = (
             st.session_state.get(override_key)
             or current
@@ -751,6 +761,7 @@ def _apply_corrections(client: VerifikaQAClient, sync_to_verifika: bool):
         st.session_state.verifika_corrected_xliff = corrected
         st.success(
             f"✅ {applied} correction(s) applied. "
-            "Use the download button on the right to get the corrected XLIFF."        )
+            "Use the download button on the right to get the corrected XLIFF."
+        )
     except Exception as e:
         st.error(f"Failed to rebuild XLIFF: {e}")
