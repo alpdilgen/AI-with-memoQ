@@ -669,66 +669,15 @@ class VerifikaQAClient:
                 "end":    int(rng.get("end", 0) or 0),
             })
 
-        # additionalData carries the *most useful* per-issue info.
-        # Two distinct shapes show up depending on the issue type:
-        #
-        # Spelling-style:
-        #   {"word": "Modunu", "suggestions": ["Odunu", "Kodunu", ...]}
-        #
-        # Terminology (issueType 1, "No target term"):
-        #   {"term": {"source": "wiring diagram",
-        #             "targetTerms": ["kablo bağlantı şeması"],
-        #             "forbiddenTerms": []},
-        #    "potentialWordForm": {
-        #         "form": "kablo bağlantı şemalarında",
-        #         "range": {"start": 33, "length": 26, "end": 59},
-        #         "baseTranslation": "kablo bağlantı şeması"}}
+        # additionalData carries the *most useful* per-issue info:
+        # the offending word, alternative suggestions, sub-issueType
+        # (which can be different from the top-level issueType — that
+        # is, server-side these are 'similar but more specific' codes).
         ad = it.get("additionalData") or {}
         offending_word = ad.get("word", "") or ""
         suggestions = []
         if isinstance(ad.get("suggestions"), list):
             suggestions = [str(s) for s in ad["suggestions"] if s]
-
-        # Terminology-specific fields
-        term_obj = ad.get("term") if isinstance(ad.get("term"), dict) else {}
-        source_term = (term_obj.get("source") or "") if term_obj else ""
-        target_terms = []
-        if term_obj and isinstance(term_obj.get("targetTerms"), list):
-            target_terms = [str(t) for t in term_obj["targetTerms"] if t]
-        forbidden_terms = []
-        if term_obj and isinstance(term_obj.get("forbiddenTerms"), list):
-            forbidden_terms = [str(t) for t in term_obj["forbiddenTerms"] if t]
-        expected_term = target_terms[0] if target_terms else ""
-
-        # potentialWordForm: target-side info — Verifika spotted the
-        # term in the target but in a wrong inflected form
-        pwf = ad.get("potentialWordForm")
-        potential_form = ""
-        potential_base = ""
-        if isinstance(pwf, dict):
-            potential_form = pwf.get("form", "") or ""
-            potential_base = pwf.get("baseTranslation", "") or ""
-            pwf_range = pwf.get("range") or {}
-            # If we have a potentialWordForm range, surface it as a
-            # target range so the UI can highlight the wrong-form
-            # substring even though Verifika put the source range in
-            # sourceRanges (terminology issues come with empty
-            # targetRanges by default).
-            try:
-                pwf_start = int(pwf_range.get("start", 0) or 0)
-                pwf_len = int(pwf_range.get("length", 0) or 0)
-                if pwf_len > 0:
-                    target_ranges.append({
-                        "start": pwf_start,
-                        "length": pwf_len,
-                        "end": pwf_start + pwf_len,
-                        "fix": potential_base or expected_term,
-                        "isFixAvailable": bool(potential_base or expected_term),
-                    })
-                    if not suggested_fix and (potential_base or expected_term):
-                        suggested_fix = potential_base or expected_term
-            except (TypeError, ValueError):
-                pass
 
         # Resolve the human label. Priority:
         #   1. server-supplied `issueKind` text (e.g. "Spelling error")
@@ -766,13 +715,6 @@ class VerifikaQAClient:
             "suggestedFix":      suggested_fix,
             "sourceRanges":      source_ranges,
             "targetRanges":      target_ranges,
-            # ── terminology-specific (issueType=1, "No target term") ──
-            "sourceTerm":        source_term,
-            "expectedTerm":      expected_term,        # primary required Turkish term
-            "targetTerms":       target_terms,         # full list (may have alternatives)
-            "forbiddenTerms":    forbidden_terms,
-            "potentialForm":     potential_form,       # the wrong inflected form found
-            "potentialBase":     potential_base,       # base form to apply
             "raw":               it,
         }
 
