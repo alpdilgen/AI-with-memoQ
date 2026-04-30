@@ -824,25 +824,32 @@ class VerifikaQAClient:
 
     # ── Issue ignore (UI 'mark as ignored' button) ─────────────────────────
 
-    def ignore_issues(self, report_id: str,
+    def ignore_issues(self, project_id: str,
                       issue_ids: List[str], ignored: bool = True) -> None:
-        """`POST /api/QualityIssues/Ignore`.
+        """
+        `POST /api/projects/{projectId}/qualityIssues/ignore` — flip the
+        Verifika "ignored" (false-positive) state for one or more issues.
 
-        report_id MUST be the real report id — pulled from any quality
-        issue's `reportId` field. The id returned by POST /api/Reports
-        is a placeholder and will produce 4301 'Report not found'.
+        Captured live from the Verifika Web UI (right-click → Mark as
+        ignored). Two non-obvious requirements observed on the wire:
+
+        1. Content-Type MUST be `application/*+json` (the Microsoft
+           "any json subtype" wildcard). Plain `application/json` is
+           rejected with HTTP 405.
+        2. The body is just the ignoreQualityIssues array — no
+           reportId, no project id (those are in the URL).
         """
         if not issue_ids:
             return
         self._request(
-            "POST", "/api/QualityIssues/Ignore",
+            "POST", f"/api/projects/{project_id}/qualityIssues/ignore",
             json_body={
-                "reportId": report_id,
                 "ignoreQualityIssues": [
                     {"qualityIssueId": str(i), "isIgnored": ignored}
                     for i in issue_ids
                 ],
             },
+            headers={"Content-Type": "application/*+json"},
             accept_status={200, 202, 204},
         )
 
