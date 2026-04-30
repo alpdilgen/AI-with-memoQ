@@ -568,38 +568,6 @@ def _render_issue_table(issues: List[Dict]):
                         )
                     )
 
-                # Apply button — splice expected_term into target
-                fix_key = f"verifika_fix_{iss['id'] or idx}_{iss['segmentId']}"
-                fix_to_apply = potential_base or expected_term
-                if st.button(
-                    f"⚡ Apply: {fix_to_apply[:30]}"
-                    + ("…" if len(fix_to_apply) > 30 else ""),
-                    key=fix_key,
-                    help=(
-                        f"Replace `{potential_form}` with `{fix_to_apply}`"
-                        if potential_form
-                        else f"Insert `{fix_to_apply}` into target"
-                    ),
-                    use_container_width=True,
-                ):
-                    if tgt_ranges:
-                        # We have a range (from potentialWordForm) —
-                        # splice in place
-                        new_target = _apply_range_fix(
-                            current or verifika_target, tgt_ranges, fix_to_apply
-                        )
-                    else:
-                        # No range info: append term to target so the
-                        # user can move it to the right place
-                        existing = current or verifika_target or ""
-                        new_target = (
-                            existing.rstrip()
-                            + (" " if existing and not existing.endswith(" ") else "")
-                            + fix_to_apply
-                        )
-                    st.session_state[override_key] = new_target
-                    st.rerun()
-
                 # Alternative target translations (if Verifika supplied
                 # more than one acceptable form)
                 if extra_targets:
@@ -620,21 +588,15 @@ def _render_issue_table(issues: List[Dict]):
                         unsafe_allow_html=True,
                     )
 
-                # Suggested fix from Verifika (one-click apply)
+                # Suggested fix from Verifika — surfaced as info, not
+                # auto-applied. The user types the correction directly
+                # in the target field above and confirms with Enter.
                 sfix = iss.get("suggestedFix") or ""
                 if sfix:
-                    fix_key = f"verifika_fix_{iss['id'] or idx}_{iss['segmentId']}"
-                    if st.button(
-                        f"⚡ Apply fix: {sfix[:30]}{'…' if len(sfix) > 30 else ''}",
-                        key=fix_key,
-                        help=f"Replace target with: {sfix}",
-                        use_container_width=True,
-                    ):
-                        new_target = _apply_range_fix(
-                            current or verifika_target, tgt_ranges, sfix
-                        )
-                        st.session_state[override_key] = new_target
-                        st.rerun()
+                    st.markdown(
+                        f"💡 Suggested: <code>{_escape_html(sfix)}</code>",
+                        unsafe_allow_html=True,
+                    )
 
                 # Other suggestions
                 sugs = iss.get("suggestions") or []
