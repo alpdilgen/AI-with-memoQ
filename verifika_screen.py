@@ -270,29 +270,19 @@ def _run_qa_workflow(client: VerifikaQAClient, qa_settings_id: str):
 
     def _ui_progress(stage: str, payload: Dict):
         if stage == "qa_progress":
-            statuses = payload.get("statuses") or []
-            st.session_state.verifika_last_statuses = statuses
-            done = sum(1 for s in statuses if int(s.get("status", 0) or 0) == 1)
-            total = len(statuses)
-            issues_so_far = len(payload.get("qualityIssues") or [])
-            # Build per-category breakdown
-            cats = []
-            for s in statuses:
-                t = s.get("issueType")
-                done_one = int(s.get("status", 0) or 0) == 1
-                label = ISSUE_TYPE_LABELS.get(t, f"T{t}")
-                cats.append(f"{'✓' if done_one else '⏳'} {label}")
-            cat_str = " · ".join(cats)
-            msg = (f"⏳ Polling… {done}/{total} categories ready, "
-                   f"{issues_so_far} issue(s) found so far\n  {cat_str}")
+            # payload is a task dict from /api/projects/{pid}/tasks
+            status = int(payload.get("status", 0) or 0)
+            left = payload.get("leftCount", "?")
+            done = payload.get("doneCount", "?")
+            modified = payload.get("modifiedOn", "")
+            state = "✓ done" if status and status != 0 else "⏳ running"
+            msg = (f"{state} — leftCount={left}, doneCount={done}"
+                   + (f", lastUpdate={modified}" if modified else ""))
         elif stage == "issues_fetched":
             msg = f"📥 {payload.get('count', 0)} issue(s) fetched"
         elif stage == "qa_completed":
-            statuses = payload.get("statuses") or []
-            issues = payload.get("qualityIssues") or []
-            msg = (f"🎯 QA completed — "
-                   f"{len(statuses)} categories all ready, "
-                   f"{len(issues)} issue(s)")
+            status = int(payload.get("status", 0) or 0)
+            msg = f"🎯 QA completed — task status={status}"
         else:
             msg = label_map.get(stage, stage)
         msgs.append(msg)
@@ -485,6 +475,10 @@ def _render_issue_table(issues: List[Dict]):
         # Target — editable, with a small preview ABOVE showing the
         # highlighted version of Verifika's reported target
         edit_key = f"verifika_edit_{iss['id'] or idx}_{iss['segmentId']}"
+        # Separate override key — Streamlit forbids writing to a widget
+        # key directly, so 'Apply fix' buttons stash their result here
+        # and the text_input picks it up via its `value=` argument.
+        override_key = edit_key + "__override"
         verifika_target = iss["targetText"] or ""
         tgt_ranges = iss.get("targetRanges") or []
         tgt_html = _highlight_target(verifika_target, tgt_ranges)
@@ -501,9 +495,17 @@ def _render_issue_table(issues: List[Dict]):
             if iss["segmentId"]
             else iss["targetText"]
         )
+        # Resolve the value to display in the editable input.
+        # Priority: override (just-applied fix) > current translation > Verifika target.
+        default_value = (
+            st.session_state.get(override_key)
+            or current
+            or iss["targetText"]
+            or ""
+        )
         cols[4].text_input(
             "target",
-            value=current or iss["targetText"] or "",
+            value=default_value,
             key=edit_key,
             label_visibility="collapsed",
         )
@@ -585,7 +587,7 @@ def _render_issue_table(issues: List[Dict]):
                             + (" " if existing and not existing.endswith(" ") else "")
                             + fix_to_apply
                         )
-                    st.session_state[edit_key] = new_target
+                    st.session_state[override_key] = new_target
                     st.rerun()
 
                 # Alternative target translations (if Verifika supplied
@@ -621,7 +623,7 @@ def _render_issue_table(issues: List[Dict]):
                         new_target = _apply_range_fix(
                             current or verifika_target, tgt_ranges, sfix
                         )
-                        st.session_state[edit_key] = new_target
+                        st.session_state[override_key] = new_target
                         st.rerun()
 
                 # Other suggestions
@@ -749,7 +751,6 @@ def _apply_corrections(client: VerifikaQAClient, sync_to_verifika: bool):
         st.session_state.verifika_corrected_xliff = corrected
         st.success(
             f"✅ {applied} correction(s) applied. "
-            "Use the download button on the right to get the corrected XLIFF."
-        )
+            "Use the download button on the right to get the corrected XLIFF."        )
     except Exception as e:
         st.error(f"Failed to rebuild XLIFF: {e}")
