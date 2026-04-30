@@ -365,50 +365,137 @@ def _render_report_section(client: VerifikaQAClient):
 # Issue table & corrections
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _highlight_target(text: str, ranges: list) -> str:
+    """
+    Wrap each Verifika target range in a red <mark> so the user can
+    see the exact problematic substring. ranges is a list of
+    {start, length, end} dicts. Falls back to plain text on any error.
+    """
+    if not text or not ranges:
+        return _escape_html(text or "")
+    try:
+        # Sort by start desc so we can splice without shifting indexes
+        sorted_r = sorted(
+            [r for r in ranges if isinstance(r, dict)],
+            key=lambda x: int(x.get("start", 0) or 0),
+            reverse=True,
+        )
+        out = text
+        for r in sorted_r:
+            start = int(r.get("start", 0) or 0)
+            length = int(r.get("length", 0) or 0)
+            if length <= 0 or start < 0 or start >= len(out):
+                continue
+            end = start + length
+            chunk = out[start:end]
+            out = (
+                _escape_html(out[:start])
+                + f"<mark style=\"background:#ffcdd2;padding:0 2px;"
+                  f"border-radius:2px;\">"
+                + _escape_html(chunk)
+                + "</mark>"
+                + _escape_html(out[end:])
+            )
+            return out  # only highlight the first range to avoid recursion
+        return _escape_html(out)
+    except Exception:
+        return _escape_html(text)
+
+
+def _escape_html(text: str) -> str:
+    """Minimal HTML escape — Streamlit unsafe_allow_html bypasses
+    its own escape, so we do it ourselves."""
+    if text is None:
+        return ""
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
 def _render_issue_table(issues: List[Dict]):
     if not issues:
         return
 
-    # Filters
+    # Filters — use issueCategory (broad) for the multiselect so users
+    # can pick "Spelling vs Common vs Terminology" etc., and the
+    # specific issueKind text shows in each row.
     f1, f2 = st.columns(2)
     with f1:
-        type_options = sorted({i["issueLabel"] for i in issues})
-        selected_types = st.multiselect(
-            "Filter by issue type", options=type_options,
-            default=type_options,
+        cat_options = sorted({i.get("issueCategory") or i["issueLabel"]
+                              for i in issues})
+        selected_cats = st.multiselect(
+            "Filter by category", options=cat_options,
+            default=cat_options,
         )
     with f2:
         show_ignored = st.checkbox("Show ignored issues", value=False)
 
     filtered = [
         i for i in issues
-        if i["issueLabel"] in selected_types
+        if (i.get("issueCategory") or i["issueLabel"]) in selected_cats
         and (show_ignored or not i.get("isIgnored"))
     ]
 
     st.caption(
         f"Showing {len(filtered)} of {len(issues)} issue(s). "
-        "Edit a target cell, then click **Apply Corrections**."
+        "Edit a target cell, then click **Apply Corrections**. "
+        "Click **Apply suggested fix** to use Verifika's auto-fix."
     )
 
-    header_cols = st.columns([1, 2, 2, 4, 4, 3])
+    # Header row
+    header_cols = st.columns([1, 2, 1, 4, 4, 4])
     for col, hdr in zip(header_cols,
-                        ["", "Type", "Seg", "Source",
-                         "Target (editable)", "Detail"]):
+                        ["", "Category", "Seg", "Source",
+                         "Target (editable)", "Issue / Suggestions"]):
         col.markdown(f"**{hdr}**")
     st.markdown("---")
 
     for idx, iss in enumerate(filtered):
-        cols = st.columns([1, 2, 2, 4, 4, 3])
+        cols = st.columns([1, 2, 1, 4, 4, 4])
+
+        # Severity icon
         cols[0].write(_severity_icon(iss["severity"]))
-        cols[1].write(iss["issueLabel"])
+
+        # Category (broad) + small issueKind underneath
+        cat = iss.get("issueCategory") or iss["issueLabel"]
+        kind = iss.get("issueKind") or ""
+        cat_html = f"**{_escape_html(cat)}**"
+        if kind and kind != cat:
+            cat_html += f"<br><span style='font-size:0.85em;color:#666;'>{_escape_html(kind)}</span>"
+        cols[1].markdown(cat_html, unsafe_allow_html=True)
+
+        # Segment id
         cols[2].code(str(iss["segmentId"]) or "—")
 
+        # Source — highlight problematic ranges
         src = iss["sourceText"] or ""
-        cols[3].write(src[:120] + ("…" if len(src) > 120 else ""))
+        src_html = _highlight_target(src, iss.get("sourceRanges") or [])
+        # Truncate very long
+        if len(src) > 200:
+            src_html = src_html[:600] + "…"
+        cols[3].markdown(
+            f"<div style='font-size:0.9em;line-height:1.35;'>{src_html}</div>",
+            unsafe_allow_html=True,
+        )
 
+        # Target — editable, with a small preview ABOVE showing the
+        # highlighted version of Verifika's reported target
         edit_key = f"verifika_edit_{iss['id'] or idx}_{iss['segmentId']}"
-        # Prefer the current Streamlit translation; fall back to Verifika's view
+        verifika_target = iss["targetText"] or ""
+        tgt_ranges = iss.get("targetRanges") or []
+        tgt_html = _highlight_target(verifika_target, tgt_ranges)
+        if len(verifika_target) > 200:
+            tgt_html = tgt_html[:600] + "…"
+        cols[4].markdown(
+            f"<div style='font-size:0.85em;line-height:1.35;color:#555;"
+            f"margin-bottom:4px;'>{tgt_html}</div>",
+            unsafe_allow_html=True,
+        )
+
         current = (
             st.session_state.translation_results.get(iss["segmentId"])
             if iss["segmentId"]
@@ -421,13 +508,67 @@ def _render_issue_table(issues: List[Dict]):
             label_visibility="collapsed",
         )
 
-        # Detail column — issueKind text + ignored flag if present
-        bits = []
-        if iss.get("issueKind"):
-            bits.append(str(iss["issueKind"]))
-        if iss.get("isIgnored"):
-            bits.append("🚫 ignored")
-        cols[5].caption(" · ".join(bits) if bits else "—")
+        # Detail column — issue specifics + actionable fix
+        with cols[5]:
+            # Offending word
+            word = iss.get("offendingWord") or ""
+            if word:
+                st.markdown(
+                    f"❗ <code>{_escape_html(word)}</code>",
+                    unsafe_allow_html=True,
+                )
+
+            # Suggested fix from Verifika (one-click apply)
+            sfix = iss.get("suggestedFix") or ""
+            if sfix:
+                fix_key = f"verifika_fix_{iss['id'] or idx}_{iss['segmentId']}"
+                if st.button(
+                    f"⚡ Apply fix: {sfix[:30]}{'…' if len(sfix) > 30 else ''}",
+                    key=fix_key,
+                    help=f"Replace target with: {sfix}",
+                    use_container_width=True,
+                ):
+                    # Apply the fix to the highlighted range only
+                    new_target = _apply_range_fix(
+                        current or verifika_target, tgt_ranges, sfix
+                    )
+                    st.session_state[edit_key] = new_target
+                    st.rerun()
+
+            # Other suggestions
+            sugs = iss.get("suggestions") or []
+            other = [s for s in sugs if s != sfix][:3]
+            if other:
+                st.caption(
+                    "Alternatives: "
+                    + " · ".join(f"`{_escape_html(s)}`" for s in other)
+                )
+
+            # Comment if present
+            if iss.get("comment"):
+                st.caption(f"💬 {iss['comment']}")
+            if iss.get("isIgnored"):
+                st.caption("🚫 ignored")
+
+
+def _apply_range_fix(target: str, ranges: list, fix: str) -> str:
+    """
+    Replace the FIRST highlighted range in `target` with `fix`.
+    Falls back to a simple substring replace if range info is unusable.
+    """
+    if not target or not ranges or not fix:
+        return target
+    try:
+        r = next((x for x in ranges if isinstance(x, dict)), None)
+        if not r:
+            return target
+        start = int(r.get("start", 0) or 0)
+        length = int(r.get("length", 0) or 0)
+        if length <= 0 or start < 0 or start + length > len(target):
+            return target
+        return target[:start] + fix + target[start + length:]
+    except Exception:
+        return target
 
 
 def _render_apply_corrections(client: VerifikaQAClient):

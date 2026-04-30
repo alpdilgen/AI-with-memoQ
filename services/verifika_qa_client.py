@@ -56,14 +56,19 @@ DEFAULT_CHUNK_SIZE = 5 * 1024 * 1024     # 5 MB
 DEFAULT_POLL_INTERVAL = 3                # seconds
 DEFAULT_POLL_TIMEOUT = 600               # 10 minutes
 
-# issueType code → human label (verified against /api/QualityIssues/kinds
-# and against the docs' polling example).
+# issueType code → human label.
+# Verified against live test responses + Web UI tabs: 'Common' contains
+# format/punctuation/untranslatable/etc. checks, while 'Spelling' is a
+# distinct category. Where the per-issue `issueKind` field is
+# available (which is most of the time), we prefer that — it's the
+# server's own description (e.g. "Invalid format of number range",
+# "Spelling error", "No untranslatable in target").
 ISSUE_TYPE_LABELS = {
-    0: "Spelling",
+    0: "Common",            # number/format/apostrophe/spacing/untranslatables
     1: "Terminology",
-    2: "Punctuation",
-    3: "Formatting",
-    4: "Untranslatables",
+    2: "Consistency",
+    3: "Spelling",
+    4: "User-defined",
     5: "Grammar",
 }
 
@@ -632,13 +637,66 @@ class VerifikaQAClient:
         src_obj = tu.get("source") or {}
         tgt_obj = tu.get("target") or {}
 
+        # Extra detail fields from the issue payload — these are
+        # what makes a finding actionable (the user can see exactly
+        # which word/range is flagged and what to change it to).
+        target_ranges_raw = it.get("targetRanges") or []
+        target_ranges = []
+        suggested_fix = ""
+        for r in target_ranges_raw:
+            if not isinstance(r, dict):
+                continue
+            rng = r.get("range") or {}
+            target_ranges.append({
+                "start":  int(rng.get("start", 0) or 0),
+                "length": int(rng.get("length", 0) or 0),
+                "end":    int(rng.get("end", 0) or 0),
+                "fix":    r.get("fix", "") or "",
+                "isFixAvailable": bool(r.get("isFixAvailable", False)),
+            })
+            if not suggested_fix and r.get("fix") and r.get("isFixAvailable"):
+                suggested_fix = r["fix"]
+
+        source_ranges_raw = it.get("sourceRanges") or []
+        source_ranges = []
+        for r in source_ranges_raw:
+            if not isinstance(r, dict):
+                continue
+            rng = r.get("range") or {}
+            source_ranges.append({
+                "start":  int(rng.get("start", 0) or 0),
+                "length": int(rng.get("length", 0) or 0),
+                "end":    int(rng.get("end", 0) or 0),
+            })
+
+        # additionalData carries the *most useful* per-issue info:
+        # the offending word, alternative suggestions, sub-issueType
+        # (which can be different from the top-level issueType — that
+        # is, server-side these are 'similar but more specific' codes).
+        ad = it.get("additionalData") or {}
+        offending_word = ad.get("word", "") or ""
+        suggestions = []
+        if isinstance(ad.get("suggestions"), list):
+            suggestions = [str(s) for s in ad["suggestions"] if s]
+
+        # Resolve the human label. Priority:
+        #   1. server-supplied `issueKind` text (e.g. "Spelling error")
+        #   2. our local ISSUE_TYPE_LABELS fallback
+        kind_text = pick(it, "issueKind", "IssueKind")
+        label = kind_text or ISSUE_TYPE_LABELS.get(
+            issue_type_int, f"Type {issue_type_int}")
+        # Top-level category for grouping/filter UI (separate from the
+        # specific issueKind text)
+        category = ISSUE_TYPE_LABELS.get(
+            issue_type_int, f"Type {issue_type_int}")
+
         return {
             "id":                pick(it, "id", "Id"),
             "reportId":          pick(it, "reportId", "ReportId"),
             "issueType":         issue_type_int,
-            "issueLabel":        ISSUE_TYPE_LABELS.get(
-                issue_type_int, f"Type {issue_type_int}"),
-            "issueKind":         pick(it, "issueKind", "IssueKind"),
+            "issueLabel":        label,                   # the SPECIFIC kind
+            "issueCategory":     category,                # the BROAD category
+            "issueKind":         kind_text,
             "issueKindId":       pick(it, "issueKindId", "IssueKindId",
                                       default=None),
             "groupId":           pick(it, "groupId", "GroupId", default=None),
@@ -650,8 +708,13 @@ class VerifikaQAClient:
             "originalTarget":    tgt_obj.get("originalText", "") or "",
             "isIgnored":         bool(it.get("isIgnored", False)),
             "comment":           pick(it, "comment", "Comment"),
-            "severity":          "warning",   # Verifika doesn't classify;
-                                              # everything is a finding
+            "severity":          "warning",
+            # ── enriched detail fields ────────────────────────────
+            "offendingWord":     offending_word,
+            "suggestions":       suggestions,
+            "suggestedFix":      suggested_fix,
+            "sourceRanges":      source_ranges,
+            "targetRanges":      target_ranges,
             "raw":               it,
         }
 
