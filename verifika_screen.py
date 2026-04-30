@@ -510,41 +510,130 @@ def _render_issue_table(issues: List[Dict]):
 
         # Detail column — issue specifics + actionable fix
         with cols[5]:
-            # Offending word
-            word = iss.get("offendingWord") or ""
-            if word:
-                st.markdown(
-                    f"❗ <code>{_escape_html(word)}</code>",
-                    unsafe_allow_html=True,
-                )
+            # ── Terminology issues (issueType=1, "No target term") ──
+            #   Show: source term → expected target term, optional wrong
+            #   inflected form, and a one-click Apply button.
+            expected_term = iss.get("expectedTerm") or ""
+            source_term = iss.get("sourceTerm") or ""
+            potential_form = iss.get("potentialForm") or ""
+            potential_base = iss.get("potentialBase") or ""
+            forbidden_list = iss.get("forbiddenTerms") or []
+            extra_targets = [t for t in (iss.get("targetTerms") or [])
+                             if t and t != expected_term]
 
-            # Suggested fix from Verifika (one-click apply)
-            sfix = iss.get("suggestedFix") or ""
-            if sfix:
+            is_terminology = bool(expected_term)
+
+            if is_terminology:
+                # Source → expected target
+                if source_term:
+                    st.markdown(
+                        f"<code>{_escape_html(source_term)}</code> "
+                        f"<span style='color:#16a34a;'>→</span> "
+                        f"<b><code>{_escape_html(expected_term)}</code></b>",
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.markdown(
+                        f"❗ Required term: "
+                        f"<b><code>{_escape_html(expected_term)}</code></b>",
+                        unsafe_allow_html=True,
+                    )
+
+                # Potential wrong form info (Verifika found a related
+                # form in the target but inflected/spelled wrong)
+                if potential_form:
+                    st.caption(
+                        f"⚠️ Found in target: `{potential_form}` "
+                        f"(should be `{potential_base or expected_term}`)"
+                    )
+
+                # Forbidden alternatives (if any)
+                if forbidden_list:
+                    st.caption(
+                        "🚫 Forbidden: "
+                        + " · ".join(
+                            f"`{_escape_html(t)}`" for t in forbidden_list[:3]
+                        )
+                    )
+
+                # Apply button — splice expected_term into target
                 fix_key = f"verifika_fix_{iss['id'] or idx}_{iss['segmentId']}"
+                fix_to_apply = potential_base or expected_term
                 if st.button(
-                    f"⚡ Apply fix: {sfix[:30]}{'…' if len(sfix) > 30 else ''}",
+                    f"⚡ Apply: {fix_to_apply[:30]}"
+                    + ("…" if len(fix_to_apply) > 30 else ""),
                     key=fix_key,
-                    help=f"Replace target with: {sfix}",
+                    help=(
+                        f"Replace `{potential_form}` with `{fix_to_apply}`"
+                        if potential_form
+                        else f"Insert `{fix_to_apply}` into target"
+                    ),
                     use_container_width=True,
                 ):
-                    # Apply the fix to the highlighted range only
-                    new_target = _apply_range_fix(
-                        current or verifika_target, tgt_ranges, sfix
-                    )
+                    if tgt_ranges:
+                        # We have a range (from potentialWordForm) —
+                        # splice in place
+                        new_target = _apply_range_fix(
+                            current or verifika_target, tgt_ranges, fix_to_apply
+                        )
+                    else:
+                        # No range info: append term to target so the
+                        # user can move it to the right place
+                        existing = current or verifika_target or ""
+                        new_target = (
+                            existing.rstrip()
+                            + (" " if existing and not existing.endswith(" ") else "")
+                            + fix_to_apply
+                        )
                     st.session_state[edit_key] = new_target
                     st.rerun()
 
-            # Other suggestions
-            sugs = iss.get("suggestions") or []
-            other = [s for s in sugs if s != sfix][:3]
-            if other:
-                st.caption(
-                    "Alternatives: "
-                    + " · ".join(f"`{_escape_html(s)}`" for s in other)
-                )
+                # Alternative target translations (if Verifika supplied
+                # more than one acceptable form)
+                if extra_targets:
+                    st.caption(
+                        "Alternatives: "
+                        + " · ".join(
+                            f"`{_escape_html(t)}`" for t in extra_targets[:3]
+                        )
+                    )
 
-            # Comment if present
+            else:
+                # ── Non-terminology issues (Spelling, Common, etc.) ──
+                # Offending word
+                word = iss.get("offendingWord") or ""
+                if word:
+                    st.markdown(
+                        f"❗ <code>{_escape_html(word)}</code>",
+                        unsafe_allow_html=True,
+                    )
+
+                # Suggested fix from Verifika (one-click apply)
+                sfix = iss.get("suggestedFix") or ""
+                if sfix:
+                    fix_key = f"verifika_fix_{iss['id'] or idx}_{iss['segmentId']}"
+                    if st.button(
+                        f"⚡ Apply fix: {sfix[:30]}{'…' if len(sfix) > 30 else ''}",
+                        key=fix_key,
+                        help=f"Replace target with: {sfix}",
+                        use_container_width=True,
+                    ):
+                        new_target = _apply_range_fix(
+                            current or verifika_target, tgt_ranges, sfix
+                        )
+                        st.session_state[edit_key] = new_target
+                        st.rerun()
+
+                # Other suggestions
+                sugs = iss.get("suggestions") or []
+                other = [s for s in sugs if s != sfix][:3]
+                if other:
+                    st.caption(
+                        "Alternatives: "
+                        + " · ".join(f"`{_escape_html(s)}`" for s in other)
+                    )
+
+            # Comment / ignored — common to both branches
             if iss.get("comment"):
                 st.caption(f"💬 {iss['comment']}")
             if iss.get("isIgnored"):
