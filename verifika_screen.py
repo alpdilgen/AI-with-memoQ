@@ -485,10 +485,6 @@ def _render_issue_table(issues: List[Dict]):
         # Target — editable, with a small preview ABOVE showing the
         # highlighted version of Verifika's reported target
         edit_key = f"verifika_edit_{iss['id'] or idx}_{iss['segmentId']}"
-        # Separate override key — Streamlit forbids writing to a widget
-        # key directly, so 'Apply fix' buttons stash their result here
-        # and the text_input picks it up via its `value=` argument.
-        override_key = edit_key + "__override"
         verifika_target = iss["targetText"] or ""
         tgt_ranges = iss.get("targetRanges") or []
         tgt_html = _highlight_target(verifika_target, tgt_ranges)
@@ -500,22 +496,14 @@ def _render_issue_table(issues: List[Dict]):
             unsafe_allow_html=True,
         )
 
-        # Resolve the value to display in the editable input.
-        # Priority: override (just-applied fix) > current translation > Verifika target.
         current = (
             st.session_state.translation_results.get(iss["segmentId"])
             if iss["segmentId"]
             else iss["targetText"]
         )
-        default_value = (
-            st.session_state.get(override_key)
-            or current
-            or iss["targetText"]
-            or ""
-        )
         cols[4].text_input(
             "target",
-            value=default_value,
+            value=current or iss["targetText"] or "",
             key=edit_key,
             label_visibility="collapsed",
         )
@@ -597,7 +585,7 @@ def _render_issue_table(issues: List[Dict]):
                             + (" " if existing and not existing.endswith(" ") else "")
                             + fix_to_apply
                         )
-                    st.session_state[override_key] = new_target
+                    st.session_state[edit_key] = new_target
                     st.rerun()
 
                 # Alternative target translations (if Verifika supplied
@@ -633,7 +621,7 @@ def _render_issue_table(issues: List[Dict]):
                         new_target = _apply_range_fix(
                             current or verifika_target, tgt_ranges, sfix
                         )
-                        st.session_state[override_key] = new_target
+                        st.session_state[edit_key] = new_target
                         st.rerun()
 
                 # Other suggestions
