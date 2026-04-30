@@ -442,20 +442,23 @@ def _render_issue_table(issues: List[Dict]):
 
     st.caption(
         f"Showing {len(filtered)} of {len(issues)} issue(s). "
-        "Edit a target cell directly (press Enter to confirm), "
-        "then click **Apply Corrections** at the bottom."
+        "Edit a target cell directly (press Enter to confirm), or tick "
+        "**False positive** to mark the issue as ignored. "
+        "Click **Apply Corrections** at the bottom to push everything to Verifika."
     )
 
-    # Header row
-    header_cols = st.columns([1, 2, 1, 4, 4, 4])
+    # Header row — 7 columns: severity, category, seg, source,
+    # target (editable), detail/suggestions, false-positive checkbox
+    header_cols = st.columns([1, 2, 1, 4, 4, 4, 2])
     for col, hdr in zip(header_cols,
                         ["", "Category", "Seg", "Source",
-                         "Target (editable)", "Issue / Suggestions"]):
+                         "Target (editable)", "Issue / Suggestions",
+                         "False positive"]):
         col.markdown(f"**{hdr}**")
     st.markdown("---")
 
     for idx, iss in enumerate(filtered):
-        cols = st.columns([1, 2, 1, 4, 4, 4])
+        cols = st.columns([1, 2, 1, 4, 4, 4, 2])
 
         # Severity icon
         cols[0].write(_severity_icon(iss["severity"]))
@@ -607,11 +610,25 @@ def _render_issue_table(issues: List[Dict]):
                         + " · ".join(f"`{_escape_html(s)}`" for s in other)
                     )
 
-            # Comment / ignored — common to both branches
+            # Comment — common to both branches.
+            # Ignored state is shown via the False-positive checkbox in cols[6].
             if iss.get("comment"):
                 st.caption(f"💬 {iss['comment']}")
-            if iss.get("isIgnored"):
-                st.caption("🚫 ignored")
+
+        # ── False-positive toggle (cols[6]) ─────────────────────────
+        # Pre-checked if Verifika already has it marked as ignored.
+        # Apply Corrections diffs this against the original isIgnored
+        # value and pushes the change to Verifika via /api/QualityIssues/Ignore.
+        ignore_key = f"verifika_ignore_{iss['id'] or idx}_{iss['segmentId']}"
+        cols[6].checkbox(
+            "False positive",
+            value=bool(iss.get("isIgnored", False)),
+            key=ignore_key,
+            help="Mark this issue as a false positive. "
+                 "Pushed to Verifika when you click Apply Corrections "
+                 "(if 'Also push corrections to Verifika' is on).",
+            label_visibility="collapsed",
+        )
 
 
 def _apply_range_fix(target: str, ranges: list, fix: str) -> str:
@@ -670,31 +687,47 @@ def _apply_corrections(client: VerifikaQAClient, sync_to_verifika: bool):
     translations = st.session_state.translation_results
     applied = 0
     verifika_updates: List[Dict] = []
+    ignore_now: List[str] = []      # issues to flip to ignored=true on Verifika
+    unignore_now: List[str] = []    # issues to flip to ignored=false on Verifika
 
     for idx, iss in enumerate(issues):
-        edit_key = f"verifika_edit_{iss['id'] or idx}_{iss['segmentId']}"
-        new_val = st.session_state.get(edit_key, "")
-        if not iss["segmentId"]:
-            continue
-        old_val = (translations.get(iss["segmentId"]) or "").strip()
-        if new_val and new_val.strip() != old_val:
-            translations[iss["segmentId"]] = new_val
-            applied += 1
-            tu_id = iss.get("translationUnitId")
-            if sync_to_verifika and tu_id:
-                verifika_updates.append({
-                    "id": tu_id,
-                    "text": new_val,
-                    "originalText": iss.get("originalTarget") or iss.get("targetText"),
-                })
+        edit_key   = f"verifika_edit_{iss['id'] or idx}_{iss['segmentId']}"
+        ignore_key = f"verifika_ignore_{iss['id'] or idx}_{iss['segmentId']}"
 
-    if not applied:
-        st.info("No changes detected. Edit a target cell before applying.")
+        # ── 1. Target text edits ──────────────────────────────────────────
+        new_val = st.session_state.get(edit_key, "")
+        if iss["segmentId"]:
+            old_val = (translations.get(iss["segmentId"]) or "").strip()
+            if new_val and new_val.strip() != old_val:
+                translations[iss["segmentId"]] = new_val
+                applied += 1
+                tu_id = iss.get("translationUnitId")
+                if sync_to_verifika and tu_id:
+                    verifika_updates.append({
+                        "id": tu_id,
+                        "text": new_val,
+                        "originalText": iss.get("originalTarget") or iss.get("targetText"),
+                    })
+
+        # ── 2. False-positive (ignore) toggle diff ────────────────────────
+        was_ignored = bool(iss.get("isIgnored", False))
+        is_ignored_now = bool(st.session_state.get(ignore_key, was_ignored))
+        if is_ignored_now != was_ignored and iss.get("id"):
+            if is_ignored_now:
+                ignore_now.append(str(iss["id"]))
+            else:
+                unignore_now.append(str(iss["id"]))
+
+    if not applied and not ignore_now and not unignore_now:
+        st.info(
+            "No changes detected. Edit a target cell or tick a False-positive box, "
+            "then click Apply Corrections."
+        )
         return
 
     st.session_state.translation_results = translations
 
-    # Push to Verifika (best-effort; failure here doesn't block local download)
+    # ── Push edits to Verifika (best-effort) ─────────────────────────────
     if sync_to_verifika and verifika_updates and st.session_state.verifika_report_id:
         try:
             client.update_translation_units(
@@ -703,6 +736,45 @@ def _apply_corrections(client: VerifikaQAClient, sync_to_verifika: bool):
             st.success(f"📤 Pushed {len(verifika_updates)} correction(s) to Verifika.")
         except VerifikaError as e:
             st.warning(f"Local apply succeeded but Verifika sync failed: {e}")
+
+    # ── Push ignore-state changes to Verifika (best-effort) ──────────────
+    if sync_to_verifika and st.session_state.verifika_report_id and (ignore_now or unignore_now):
+        try:
+            if ignore_now:
+                client.ignore_issues(
+                    st.session_state.verifika_report_id, ignore_now, ignored=True
+                )
+            if unignore_now:
+                client.ignore_issues(
+                    st.session_state.verifika_report_id, unignore_now, ignored=False
+                )
+            id_to_ignored = {i: True for i in ignore_now}
+            id_to_ignored.update({i: False for i in unignore_now})
+            for it in issues:
+                if it.get("id") in id_to_ignored:
+                    it["isIgnored"] = id_to_ignored[it["id"]]
+            parts = []
+            if ignore_now:
+                parts.append(f"{len(ignore_now)} marked as false positive")
+            if unignore_now:
+                parts.append(f"{len(unignore_now)} unmarked")
+            st.success(f"🚫 Verifika ignore-state updated — {', '.join(parts)}.")
+        except VerifikaError as e:
+            st.warning(f"Verifika ignore-state sync failed: {e}")
+    elif (ignore_now or unignore_now):
+        id_to_ignored = {i: True for i in ignore_now}
+        id_to_ignored.update({i: False for i in unignore_now})
+        for it in issues:
+            if it.get("id") in id_to_ignored:
+                it["isIgnored"] = id_to_ignored[it["id"]]
+        st.info(
+            f"Marked {len(ignore_now)} as false positive locally "
+            f"(not pushed — 'Also push to Verifika' is unchecked)."
+        )
+
+    # If only ignore-state changed (no text edits), skip XLIFF rebuild.
+    if not applied:
+        return
 
     # Rebuild XLIFF for local download
     seg_objs       = st.session_state.get("segment_objects", {})
