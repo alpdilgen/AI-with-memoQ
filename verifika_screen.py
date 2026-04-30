@@ -633,7 +633,7 @@ def _render_issue_table(issues: List[Dict]):
                         new_target = _apply_range_fix(
                             current or verifika_target, tgt_ranges, sfix
                         )
-                        st.session_state[edit_key] = new_target
+                        st.session_state[override_key] = new_target
                         st.rerun()
 
                 # Other suggestions
