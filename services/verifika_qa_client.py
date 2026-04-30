@@ -530,83 +530,104 @@ class VerifikaQAClient:
 
     # ── Quality issues ──────────────────────────────────────────────────────
 
-    def get_quality_issues_payload(self, project_id: str) -> Dict:
+    def get_quality_issues_payload(
+        self,
+        project_id: str,
+        task_id: Optional[str] = None,
+    ) -> Dict:
         """
-        Raw `GET /api/QualityIssues?projectId=X` response. Shape:
-            {
-              "qualityIssues": [...],
-              "statuses": [{"issueType":N, "status":0|1}, ...]
-            }
+        Raw `GET /api/QualityIssues?projectId=X[&taskId=Y]` response.
 
-        IMPORTANT: We query with projectId, NOT reportId. The server
-        side runs the actual QA against an automatically-created
-        report whose id we cannot retrieve via POST /api/Reports
-        (that endpoint creates a separate placeholder report that
-        always stays empty). projectId is the only reliable key —
-        verified live: the same response that comes back to the Web
-        UI is what we get here.
-
-        Each issue in the response carries its own `reportId` field
-        (the *real* report id), which is what we use for downstream
-        actions like update_translation_units and ignore_issues.
+        Restored from the bf2ec8a task-based workflow: when we drive
+        QA via /api/projects/{pid}/tasks/{tid}/check, the polling and
+        final fetch must include taskId so the server returns the
+        statuses array tied to that running task. Without taskId, the
+        server returns a stale/empty placeholder payload that never
+        flips status to 1.
         """
-        result = self._request(
-            "GET", "/api/QualityIssues",
-            params={"projectId": project_id},
-        )
+        params: Dict = {"projectId": project_id}
+        if task_id:
+            params["taskId"] = task_id
+        result = self._request("GET", "/api/QualityIssues", params=params)
         if isinstance(result, dict):
             return result
         return {"qualityIssues": [], "statuses": []}
 
-    def get_quality_issues(self, project_id: str) -> List[Dict]:
-        """Normalised flat list of issue dicts."""
-        payload = self.get_quality_issues_payload(project_id)
-        raw = payload.get("qualityIssues") or []
-        return [self._normalise_issue(it) for it in raw if isinstance(it, dict)]
-
-    def wait_for_qa_completion(
+    def get_quality_issues(
         self,
         project_id: str,
+        task_id: Optional[str] = None,
+    ) -> List[Dict]:
+        """Normalised flat list of issue dicts (task_id included if given)."""
+        payload = self.get_quality_issues_payload(project_id, task_id=task_id)
+        raw = payload.get("qualityIssues") or []
+        if not raw and isinstance(payload, dict):
+            for k in ("value", "items", "results", "issues", "data"):
+                if isinstance(payload.get(k), list):
+                    raw = payload[k]; break
+        return [self._normalise_issue(it) for it in raw if isinstance(it, dict)]
+
+    def wait_for_task_completion(
+        self,
+        project_id: str,
+        task_id: str,
         poll_interval: int = DEFAULT_POLL_INTERVAL,
         timeout: int = DEFAULT_POLL_TIMEOUT,
         progress_cb: Optional[Callable[[Dict], None]] = None,
     ) -> Dict:
         """
-        Poll /api/QualityIssues?projectId=X until every category's
-        status == 1. Returns the final payload.
+        Poll /api/projects/{pid}/tasks until our task reports completion.
 
-        Note: we key on projectId, not reportId, because the report
-        the server runs the QA against is internally managed and not
-        the same object as the one our POST /api/Reports returns.
-        See get_quality_issues_payload for the full story.
+        This is the `bf2ec8a` working-version polling — the QualityIssues
+        ?projectId= polling that replaced this in 28e6b1d does NOT see
+        the server flip statuses to 1 in the current Verifika beta, so
+        we are reverting to task-driven polling here.
+
+        Heuristics for "done":
+            - status != 0          (0 == new/running)
+            - or leftCount == 0 AND task has been touched
+              (modifiedOn > createdOn)
+
+        Returns the final task dict.
         """
         deadline = time.time() + timeout
-        last: Dict = {}
+        last_task: Dict = {}
+        first_seen = None
+
         while time.time() < deadline:
             try:
-                payload = self.get_quality_issues_payload(project_id)
+                tasks = self.list_tasks(project_id)
             except VerifikaError as e:
-                logger.warning("Polling fetch failed: %s", e)
+                logger.warning("Task polling fetch failed: %s", e)
                 time.sleep(poll_interval)
                 continue
 
-            last = payload
-            statuses = payload.get("statuses") or []
-            if progress_cb:
-                try: progress_cb(payload)
-                except Exception: pass
+            ours = [t for t in tasks if t.get("id") == task_id]
+            if ours:
+                t = ours[0]
+                last_task = t
+                if first_seen is None:
+                    first_seen = t.get("createdOn")
+                if progress_cb:
+                    try: progress_cb(t)
+                    except Exception: pass
 
-            if statuses and all(int(s.get("status", 0) or 0) == 1
-                                for s in statuses):
-                logger.info("Verifika: all %d issue-type statuses ready",
-                            len(statuses))
-                return payload
+                status = t.get("status", 0)
+                left = t.get("leftCount", 0)
+                modified = t.get("modifiedOn")
+                # Verifika sets status > 0 when QA finishes (1=ready,
+                # 2=accepted, etc). leftCount drops to 0 progressively.
+                if status and status != 0:
+                    return t
+                if (left == 0 and modified and first_seen
+                        and modified != first_seen):
+                    return t
 
             time.sleep(poll_interval)
 
         raise VerifikaError(
-            f"QA for project {project_id} not ready after {timeout}s "
-            f"(last statuses: {last.get('statuses')})"
+            f"Task {task_id} not finished after {timeout}s "
+            f"(last task: {last_task})"
         )
 
     @staticmethod
@@ -796,103 +817,96 @@ class VerifikaQAClient:
         xliff_bytes: bytes,
         xliff_filename: str,
         qa_settings_id: str,
+        assigned_to_id: Optional[str] = None,
         progress_cb: Optional[Callable[[str, Dict], None]] = None,
     ) -> Tuple[str, str, List[Dict]]:
         """
-        Full chain:
-            create_project → upload_file → create_report → run_report
-            → poll → fetch issues
-        Returns (project_id, report_id, [normalised issues]).
+        Full task-based Verifika QA chain (restored from bf2ec8a — the
+        last known-working version):
+
+            create_project → upload_file → start_project (creates task)
+              → list_tasks → accept_tasks → check_task (fires QA)
+              → wait_for_task_completion (polls /tasks until status > 0)
+              → get_quality_issues(projectId, taskId)
+
+        We deliberately do NOT call create_report / run_report here.
+        The /api/Reports + /api/Reports/{id}/Generate path returns 202
+        without actually triggering server-side analysis on the current
+        Verifika beta — that path was the cause of the "polling stuck
+        at 0/6" regression introduced in 28e6b1d/480e5d0. The real QA
+        is fired by /api/projects/{pid}/tasks/{tid}/check, and the
+        statuses become observable via /api/projects/{pid}/tasks
+        (status field) — NOT via /api/QualityIssues?projectId= polling.
+
+        The first issue's `reportId` field is the real internal report
+        id — we surface that as the second tuple element so the caller
+        can use it for update_translation_units and ignore_issues.
+        Falls back to task_id if no issues are returned.
         """
         def _emit(stage: str, payload: Dict):
             if progress_cb:
                 try: progress_cb(stage, payload)
                 except Exception: pass
 
-        # 1. Project
+        # 1. Create project (with QA profile baked in)
         project = self.create_project(project_name, qa_settings_id=qa_settings_id)
         project_id = project.get("id") or project.get("Id") or ""
         if not project_id:
-            raise VerifikaError(f"Project create response missing id: {project}")
+            raise VerifikaError(f"Project create returned no id: {project}")
         _emit("project_created", project)
 
-        # 2. Upload (chunks + commit)
+        # 2. Upload file (chunked multipart + commit)
         upload = self.upload_file(project_id, xliff_bytes, xliff_filename)
         _emit("file_uploaded", upload)
 
-        # 3. Start project (creates a task and assigns it to current user).
-        # This is what the Web UI's "Start QA" button calls.
-        try:
-            self.start_project(project_id)
-            _emit("project_started", {"projectId": project_id})
-        except VerifikaError as e:
-            logger.warning("start_project failed (continuing anyway): %s", e)
+        # 3. Resolve user GUID for task assignment
+        user_id = assigned_to_id or self.get_current_user_id()
 
-        # 4. Read the task id the server just created
-        task_id: Optional[str] = None
-        try:
-            tasks = self.list_tasks(project_id)
-            if tasks:
-                task_id = tasks[0].get("id") or tasks[0].get("Id")
-                _emit("task_ready", tasks[0])
-        except VerifikaError as e:
-            logger.warning("list_tasks failed: %s", e)
+        # 4. Start project (creates task, assigns it — "Start QA" equivalent)
+        start_resp = self.start_project(project_id, assigned_to_id=user_id)
+        _emit("project_started", start_resp if isinstance(start_resp, dict)
+              else {"projectId": project_id})
 
-        # 5. Accept the task(s). No-op if already accepted.
-        try:
-            self.accept_tasks(project_id)
-            _emit("tasks_accepted", {"projectId": project_id})
-        except VerifikaError as e:
-            logger.warning("accept_tasks failed: %s", e)
+        # 5. Read the created task id
+        tasks = self.list_tasks(project_id)
+        if not tasks:
+            raise VerifikaError(
+                "No tasks visible after /start — server did not create one?"
+            )
+        task = tasks[0]
+        task_id = task.get("id") or task.get("Id") or ""
+        if not task_id:
+            raise VerifikaError(f"Task missing id: {task}")
+        _emit("task_ready", task)
 
-        # 6. Report (idempotent — created automatically by /start, but
-        #    we still need its id for QualityIssues queries)
-        report_id = self.create_report(project_id)
-        _emit("report_created", {"reportId": report_id})
+        # 6. Accept the task(s). No-op if already accepted.
+        self.accept_tasks(project_id)
+        _emit("tasks_accepted", {"projectId": project_id})
 
-        # 7. ⭐ Trigger the actual QA analysis. The Reports/Generate
-        #    endpoint alone is not enough; tasks/{id}/check is what
-        #    makes the server start computing issues.
-        triggered = False
-        if task_id:
-            try:
-                self.check_task(project_id, task_id)
-                _emit("qa_check_triggered", {"taskId": task_id})
-                triggered = True
-            except VerifikaError as e:
-                logger.warning("tasks/{id}/check failed: %s", e)
+        # 7. ⭐ Fire QA on the task — this is the call that actually
+        #    starts server-side analysis.
+        self.check_task(project_id, task_id)
+        _emit("qa_check_triggered", {"taskId": task_id})
 
-        # Fall back to Reports/Generate if check_task wasn't possible
-        if not triggered:
-            try:
-                self.run_report(report_id)
-                _emit("report_started", {"reportId": report_id})
-            except VerifikaError as e:
-                logger.warning("Reports/Generate failed: %s", e)
-
-        # 8. Poll — keyed on projectId (NOT reportId, because the
-        #    server's internal report is not the one our POST /api/Reports
-        #    returned; projectId is the only reliable key).
-        final_payload = self.wait_for_qa_completion(
-            project_id,
-            progress_cb=lambda p: _emit("qa_progress", p),
+        # 8. Poll the task (NOT QualityIssues) — bf2ec8a working logic.
+        final_task = self.wait_for_task_completion(
+            project_id, task_id,
+            progress_cb=lambda t: _emit("qa_progress", t),
         )
-        _emit("qa_completed", final_payload)
+        _emit("qa_completed", final_task)
 
-        # 9. Normalise issues. Each issue carries its own `reportId`
-        #    (the *real* internal report id) — we surface that so the
-        #    caller can use it for update_translation_units / ignore.
-        raw_issues = final_payload.get("qualityIssues") or []
-        issues = [self._normalise_issue(it) for it in raw_issues
-                  if isinstance(it, dict)]
+        # 9. Fetch issues with BOTH projectId AND taskId, then normalise.
+        issues = self.get_quality_issues(project_id, task_id=task_id)
         _emit("issues_fetched", {"count": len(issues)})
 
-        # Pull the real report id from the first issue if available;
-        # fall back to the placeholder we created earlier.
-        real_report_id = report_id
-        for it in raw_issues:
-            if isinstance(it, dict) and it.get("reportId"):
-                real_report_id = it["reportId"]
+        # Surface the real report id (from any issue), falling back to
+        # task_id so update_translation_units / ignore_issues callers
+        # have a non-empty handle.
+        real_report_id = task_id
+        for iss in issues:
+            rid = iss.get("reportId")
+            if rid:
+                real_report_id = rid
                 break
 
         return project_id, real_report_id, issues
