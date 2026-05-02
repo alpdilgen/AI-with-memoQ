@@ -37,6 +37,7 @@ def _init_session_state():
         "verifika_qa_profile_id":     None,
         "verifika_project_id":        None,
         "verifika_report_id":         None,
+        "verifika_task_id":           None,
         "verifika_issues":            [],
         "verifika_run_status":        "idle",   # idle/running/done/error
         "verifika_last_error":        "",
@@ -219,6 +220,7 @@ def _run_qa_workflow(client: VerifikaQAClient, qa_settings_id: str):
     st.session_state.verifika_run_status = "running"
     st.session_state.verifika_progress_messages = []
     st.session_state.verifika_issues = []
+    st.session_state.verifika_task_id = None
     st.session_state.verifika_last_error = ""
     st.session_state.verifika_corrected_xliff = None
     st.session_state.verifika_last_statuses = []
@@ -285,6 +287,13 @@ def _run_qa_workflow(client: VerifikaQAClient, qa_settings_id: str):
             cat_str = " · ".join(cats)
             msg = (f"⏳ Polling… {done}/{total} categories ready, "
                    f"{issues_so_far} issue(s) found so far\n  {cat_str}")
+        elif stage == "task_ready":
+            # Capture the running task id — we need it for
+            # client.update_translation_units (per-unit recheck endpoint).
+            tid = payload.get("id") or payload.get("Id")
+            if tid:
+                st.session_state.verifika_task_id = tid
+            msg = label_map.get(stage, stage)
         elif stage == "issues_fetched":
             msg = f"📥 {payload.get('count', 0)} issue(s) fetched"
         elif stage == "qa_completed":
@@ -728,14 +737,25 @@ def _apply_corrections(client: VerifikaQAClient, sync_to_verifika: bool):
     st.session_state.translation_results = translations
 
     # ── Push edits to Verifika (best-effort) ─────────────────────────────
-    if sync_to_verifika and verifika_updates and st.session_state.verifika_report_id:
+    # The recheck endpoint is project- and task-scoped, so we need both
+    # verifika_project_id and verifika_task_id (captured from task_ready).
+    if (sync_to_verifika and verifika_updates
+            and st.session_state.verifika_project_id
+            and st.session_state.verifika_task_id):
         try:
-            client.update_translation_units(
-                st.session_state.verifika_report_id, verifika_updates
+            n_pushed = client.update_translation_units(
+                st.session_state.verifika_project_id,
+                st.session_state.verifika_task_id,
+                verifika_updates,
             )
-            st.success(f"📤 Pushed {len(verifika_updates)} correction(s) to Verifika.")
+            st.success(f"📤 Pushed {n_pushed} correction(s) to Verifika.")
         except VerifikaError as e:
             st.warning(f"Local apply succeeded but Verifika sync failed: {e}")
+    elif sync_to_verifika and verifika_updates:
+        st.warning(
+            "Local apply succeeded but Verifika sync skipped — "
+            "missing project_id or task_id in session state."
+        )
 
     # ── Push ignore-state changes to Verifika (best-effort) ──────────────
     # ignore_issues uses project-scoped path /api/projects/{pid}/qualityIssues/ignore,
