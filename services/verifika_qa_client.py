@@ -780,47 +780,66 @@ class VerifikaQAClient:
 
     def update_translation_units(
         self,
-        report_id: str,
+        project_id: str,
+        task_id: str,
         updates: List[Dict],
-    ) -> None:
+    ) -> int:
         """
-        `POST /api/QualityIssues/updateTranslationUnits`
+        `POST /api/projects/{projectId}/qualityIssues/recheck` — one
+        request per translation unit (the server doesn't accept batch).
 
-        Args:
-            report_id: report uuid
-            updates:   list of {"id": <translationUnitId>, "text": "<new target>"}
+        Captured live from the Verifika Web UI. Required:
+          • Content-Type: `application/*+json` (NOT plain application/json)
+          • `taskid` HTTP header (lowercase) with the running task id
+          • Body shape: {taskId, targetSegment{elements, text, originalText,
+                                                 hasChanges}, translationUnitId}
 
-        We wrap each into the segment object the server expects.
+        Returns the number of units the server accepted.
         """
         if not updates:
-            return
-        payload_units = []
+            return 0
+        if not task_id:
+            raise VerifikaError(
+                "update_translation_units requires task_id (session "
+                "state \"verifika_task_id\" was not populated)"
+            )
+
+        accepted = 0
         for u in updates:
             tu_id = u.get("id")
+            text = u.get("text", "") or ""
             if not tu_id:
                 continue
-            text = u.get("text", "")
-            payload_units.append({
-                "id": tu_id,
-                "target": {
-                    "elements": [],
+            length = len(text)
+            body = {
+                "taskId": task_id,
+                "targetSegment": {
+                    "elements": [
+                        {
+                            "elementType": 1,
+                            "text": text,
+                            "start": 0,
+                            "length": length,
+                            "end": length,
+                        }
+                    ],
+                    "hasChanges": False,
                     "text": text,
-                    "originalText": u.get("originalText", text),
-                    "hasChanges": True,
+                    "originalText": u.get("originalText", text) or text,
                 },
-            })
-
-        if not payload_units:
-            return
-
-        self._request(
-            "POST", "/api/QualityIssues/updateTranslationUnits",
-            json_body={
-                "reportId": report_id,
-                "translationUnits": payload_units,
-            },
-            accept_status={200, 202, 204},
-        )
+                "translationUnitId": tu_id,
+            }
+            self._request(
+                "POST", f"/api/projects/{project_id}/qualityIssues/recheck",
+                json_body=body,
+                headers={
+                    "Content-Type": "application/*+json",
+                    "taskid": task_id,
+                },
+                accept_status={200, 202, 204},
+            )
+            accepted += 1
+        return accepted
 
     # ── Issue ignore (UI 'mark as ignored' button) ─────────────────────────
 
